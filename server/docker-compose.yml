@@ -1,0 +1,27 @@
+services:
+  fastbid:
+    build: .
+    network_mode: host
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    environment:
+      FASTBID_TCP_HOST: 127.0.0.1
+      FASTBID_TCP_PORT: 9000
+      FASTBID_UDP_MCAST_ADDR: 239.255.0.1
+      FASTBID_UDP_MCAST_PORT: 5000
+    restart: unless-stopped
+    stop_grace_period: 30s
+  ws_bridge:
+    build:
+      context: ../client
+      dockerfile: Dockerfile.bridge
+    network_mode: host
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    environment:
+      FASTBID_WS_HOST: 127.0.0.1
+      FASTBID_ALLOWED_ORIGINS: ${FASTBID_ALLOWED_ORIGINS:-http://localhost:5173,http://127.0.0.1:5173}
+    restart: unless-stopped
+    depends_on: [fastbid]

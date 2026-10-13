@@ -1,0 +1,266 @@
+:root {
+  --bg-dark: #0a0e17;
+  --bg-card: #151a25;
+  --text-main: #e2e8f0;
+  --text-muted: #94a3b8;
+  --color-buy: #10b981;
+  --color-buy-bg: rgba(16, 185, 129, 0.15);
+  --color-sell: #ef4444;
+  --color-sell-bg: rgba(239, 68, 68, 0.15);
+  --color-accent: #3b82f6;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+  --font-sans: 'Inter', -apple-system, sans-serif;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-dark);
+  color: var(--text-main);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+.dashboard {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 20px;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 30px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  padding-bottom: 15px;
+}
+
+h1 {
+  font-weight: 800;
+  margin: 0;
+  letter-spacing: -0.5px;
+  background: linear-gradient(90deg, #fff, #a5b4fc);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+h2 {
+  font-size: 1.1rem;
+  font-weight: 600;
+  margin-top: 0;
+  margin-bottom: 20px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.status {
+  padding: 6px 12px;
+  border-radius: 4px;
+  font-weight: 600;
+  font-size: 0.85rem;
+  letter-spacing: 1px;
+}
+
+.status.connected {
+  background-color: var(--color-buy-bg);
+  color: var(--color-buy);
+}
+
+.status.disconnected {
+  background-color: var(--color-sell-bg);
+  color: var(--color-sell);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr 1.5fr;
+  gap: 24px;
+}
+
+.card {
+  background-color: var(--bg-card);
+  border-radius: 12px;
+  padding: 24px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.left-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+}
+
+.stat-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 12px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.stat-row:last-child {
+  border-bottom: none;
+}
+
+.accent-blue {
+  color: var(--color-accent);
+  font-weight: 600;
+  font-family: var(--font-mono);
+}
+
+.trade-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.trade-list::-webkit-scrollbar {
+  width: 6px;
+}
+.trade-list::-webkit-scrollbar-thumb {
+  background: rgba(255,255,255,0.1);
+  border-radius: 3px;
+}
+
+.trade-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+}
+
+.trade-row.buy {
+  background-color: var(--color-buy-bg);
+  color: var(--color-buy);
+}
+
+.trade-row.sell {
+  background-color: var(--color-sell-bg);
+  color: var(--color-sell);
+}
+
+/* Order Book Styles */
+.book-headers {
+  display: flex;
+  justify-content: space-between;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin-bottom: 12px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.1);
+}
+
+.book-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 4px 0;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  position: relative;
+}
+
+.price.buy { color: var(--color-buy); }
+.price.sell { color: var(--color-sell); }
+.qty { color: var(--text-main); }
+
+.depth-bar {
+  position: absolute;
+  right: 0;
+  top: 1px;
+  bottom: 1px;
+  opacity: 0.2;
+  z-index: 0;
+  transition: width 0.2s ease-out;
+}
+
+.bid-bar { background-color: var(--color-buy); }
+.ask-bar { background-color: var(--color-sell); }
+
+.price, .qty {
+  position: relative;
+  z-index: 1;
+}
+
+.spread-divider {
+  text-align: center;
+  padding: 12px 0;
+  margin: 12px 0;
+  font-family: var(--font-mono);
+  color: var(--text-muted);
+  background-color: rgba(255,255,255,0.02);
+  border-top: 1px dashed rgba(255,255,255,0.1);
+  border-bottom: 1px dashed rgba(255,255,255,0.1);
+}
+
+/* Order Entry Styles */
+.order-entry-card {
+  margin-top: 24px;
+}
+
+.form-group {
+  margin-bottom: 15px;
+}
+
+.form-group label {
+  display: block;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin-bottom: 5px;
+  text-transform: uppercase;
+}
+
+.form-group input {
+  width: 100%;
+  box-sizing: border-box;
+  background-color: rgba(0, 0, 0, 0.2);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-main);
+  padding: 10px;
+  border-radius: 6px;
+  font-family: var(--font-mono);
+  font-size: 1rem;
+}
+
+.form-group input:focus {
+  outline: none;
+  border-color: var(--color-accent);
+}
+
+.action-buttons {
+  display: flex;
+  gap: 10px;
+  margin-top: 20px;
+}
+
+.btn-buy, .btn-sell {
+  flex: 1;
+  padding: 12px;
+  border: none;
+  border-radius: 6px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: opacity 0.2s, transform 0.1s;
+  color: white;
+}
+
+.btn-buy {
+  background-color: var(--color-buy);
+}
+
+.btn-sell {
+  background-color: var(--color-sell);
+}
+
+.btn-buy:hover, .btn-sell:hover {
+  opacity: 0.9;
+}
+
+.btn-buy:active, .btn-sell:active {
+  transform: scale(0.98);
+}
