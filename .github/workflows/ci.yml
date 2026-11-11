@@ -1,0 +1,203 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cpp:
+    name: C++ / ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gcc-release
+            compiler: g++
+            build_type: Release
+            options: -DBUILD_BENCHMARKS=ON
+          - name: clang-asan-ubsan
+            compiler: clang++
+            build_type: Debug
+            options: -DENABLE_SANITIZERS=ON
+          - name: gcc-coverage
+            compiler: g++
+            build_type: Debug
+            options: -DENABLE_COVERAGE=ON
+    env:
+      ASAN_OPTIONS: detect_leaks=1:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install build and coverage tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake g++ clang python3 gcovr
+      - name: Configure
+        run: >-
+          cmake -S server -B build
+          -DCMAKE_CXX_COMPILER=${{ matrix.compiler }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DBUILD_TESTS=ON ${{ matrix.options }}
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Unit, model and real-socket tests
+        run: ctest --test-dir build --output-on-failure --parallel 2 --output-junit "$GITHUB_WORKSPACE/build/test-results.xml"
+      - name: Allocation regression guard
+        if: matrix.name == 'gcc-release'
+        run: ./build/fastbid_bench
+      - name: Coverage report
+        if: always() && matrix.name == 'gcc-coverage'
+        run: >-
+          gcovr build --root . --filter 'server/src/' --object-directory build
+          --xml build/coverage.xml --xml-pretty --html-details build/coverage.html --print-summary
+      - name: Upload test diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cpp-${{ matrix.name }}
+          path: |
+            build/test-results.xml
+            build/Testing/Temporary/LastTest.log
+            build/coverage*.html
+            build/coverage*.css
+            build/coverage.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  thread-sanitizer:
+    name: C++ / ThreadSanitizer
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Configure and build
+        run: |
+          cmake -S server -B build -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON -DENABLE_TSAN=ON
+          cmake --build build --parallel 2
+      - name: Run concurrent queue and statistics checks
+        env:
+          TSAN_OPTIONS: halt_on_error=1
+        run: |
+          # Keep the hosted runner's address layout compatible with GCC TSan.
+          sudo sysctl vm.mmap_rnd_bits=28
+          ./build/tests/fastbid_tests --gtest_filter='SPSCQueueTest.ConcurrentProducerConsumer:Stats.ConcurrentTransferAccountsForEverySample:EngineConcurrency.*' --gtest_output=xml:build/tsan-results.xml
+      - name: Upload race-check results
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: thread-sanitizer
+          path: build/tsan-results.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+  frontend:
+    name: Frontend and bridge / Node ${{ matrix.node }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - name: Install locked dependencies
+        working-directory: client
+        run: npm ci
+      - name: Build dashboard and test bridge failure paths
+        working-directory: client
+        run: npm test
+
+  paper-e2e:
+    name: Docker paper stack and Chromium
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    env:
+      FASTBID_PAPER_PORT: 18080
+      PAPER_BASE_URL: http://127.0.0.1:18080
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - name: Install browser test dependencies
+        working-directory: client
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: Validate and start isolated paper stack
+        run: |
+          docker compose -p fastbid-tests -f compose.paper.yml config --quiet
+          docker compose -p fastbid-tests -f compose.paper.yml up -d --build --wait --wait-timeout 120
+      - name: Test real orders over HTTP and WebSockets
+        working-directory: client
+        run: npm run test:paper -- "$PAPER_BASE_URL"
+      - name: Test dashboard in Chromium
+        working-directory: client
+        run: npm run test:e2e
+      - name: Save container diagnostics
+        if: always()
+        run: |
+          mkdir -p build
+          docker compose -p fastbid-tests -f compose.paper.yml logs --no-color > build/paper-stack.log
+      - name: Upload browser failure diagnostics
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: paper-browser-results
+          path: |
+            build/paper-stack.log
+            client/playwright-report/
+            client/test-results/
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Stop test stack
+        if: always()
+        run: docker compose -p fastbid-tests -f compose.paper.yml down
+
+  bridge-integration:
+    name: Real engine and browser bridge protocol
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: client/package-lock.json
+      - name: Build engine
+        run: |
+          cmake -S server -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --parallel 2
+      - name: Install bridge dependencies and verify protocols
+        working-directory: client
+        run: |
+          npm ci
+          npm run test:bridge -- ../build/fastbid
