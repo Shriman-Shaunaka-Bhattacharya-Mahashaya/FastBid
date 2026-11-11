@@ -443,7 +443,7 @@ cmake --build build/asan -j
 ctest --test-dir build/asan --output-on-failure
 ```
 
-ASan [AddressSanitizer] detects many memory access errors. UBSan [UndefinedBehaviorSanitizer] detects operations that violate C++ rules. For concurrent-access checking, use a separate build:
+ASan [AddressSanitizer] detects many memory access errors. UBSan [UndefinedBehaviorSanitizer] detects operations that violate C++ rules. Sanitizer builds disable recovery from undefined behavior, so a diagnostic fails the test locally as well as in CI without requiring extra environment settings. For concurrent-access checking, use a separate build:
 
 ```bash
 cmake -S server -B build/tsan -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON -DENABLE_TSAN=ON

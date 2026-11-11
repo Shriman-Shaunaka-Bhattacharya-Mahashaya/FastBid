@@ -26,7 +26,10 @@ BasketRequest request(std::initializer_list<BasketLeg> legs = {{1, 2}, {2, 3}}, 
     BasketRequest r{};
     r.request_id = 123;
     r.leg_count = static_cast<uint16_t>(legs.size());
-    std::memcpy(r.legs, legs.begin(), legs.size() * sizeof(BasketLeg));
+    // An empty initializer_list may have a null begin(); memcpy requires non-null
+    // arguments even when its byte count is zero.
+    if (legs.size() != 0)
+        std::memcpy(r.legs, legs.begin(), legs.size() * sizeof(BasketLeg));
     const auto length = std::strlen(name);
     std::memcpy(r.name, name, length < sizeof(r.name) ? length : sizeof(r.name));
     return r;
