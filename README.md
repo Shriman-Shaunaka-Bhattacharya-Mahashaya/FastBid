@@ -16,6 +16,7 @@ The focus is predictable order processing: preallocated memory, one owner of the
 - [Build and run from source](#build-and-run-from-source)
 - [Configuration](#configuration)
 - [Protocols and overload behavior](#protocols-and-overload-behavior)
+- [Continuous integration](#continuous-integration)
 - [Testing and performance measurement](#testing-and-performance-measurement)
 - [Operations and troubleshooting](#operations-and-troubleshooting)
 - [Limitations and future work](#limitations-and-future-work)
@@ -173,6 +174,7 @@ There is no database, `io_uring` integration, kernel-bypass implementation, or C
 ```text
 FastBid/
   README.md
+  .github/workflows/ci.yml       Automated build, sanitizer, integration and browser checks
   compose.paper.yml             Local complete paper-trading stack
   paper.ps1                     Windows lifecycle helper
   docs/PROTOCOL.md              Binary layouts and message semantics
@@ -256,6 +258,7 @@ Environment variables [settings supplied when starting a process] configure the 
 
 | Variable | Default outside paper Compose | Meaning |
 | --- | --- | --- |
+| `FASTBID_PAPER_PORT` | `8080` | Published paper-stack host port and matching allowed browser origins |
 | `FASTBID_TCP_HOST` | `127.0.0.1` | Engine bind IPv4; bridge's engine destination |
 | `FASTBID_TCP_PORT` | `9000` | Binary order entry |
 | `FASTBID_UDP_MCAST_ADDR` | `239.255.0.1` | Engine UDP destination; bridge multicast membership |
@@ -309,6 +312,65 @@ TCP preserves byte order but not message boundaries; the parser handles split an
 
 Public UDP data is best effort [delivery is not guaranteed]. One trade packet is published per match, while each participant receives a private fill. Full top-10 snapshots recover displayed depth after missed packets, but there is no replay for missed trades.
 
+## Continuous integration
+
+[The CI workflow](.github/workflows/ci.yml) runs on every push, pull request, and manual dispatch. Push the workflow with the project to enable these checks in GitHub's **Actions** tab. No deployment or image publication is performed. Required branch-protection checks must be selected separately in repository settings after the first run.
+
+| Job | Checks |
+| --- | --- |
+| GCC Release | Unit/model/socket tests and a C++ allocation regression guard |
+| Clang ASan/UBSan | The same CTest suite with memory/undefined-behavior instrumentation |
+| GCC coverage | Instrumented suite plus HTML and Cobertura XML coverage reports |
+| ThreadSanitizer | Concurrent queue, sample-transfer and two-thread engine stress tests |
+| Node.js 22 and 24 | Locked dependency installation, dashboard build, controlled bridge failure-path tests |
+| Engine/bridge integration | Real C++ engine and browser bridge protocol interoperability |
+| Docker and Chromium | Isolated paper-image build, readiness, socket smoke test and actual dashboard browser tests |
+
+The workflow has read-only repository permissions, pins third-party actions to commit hashes, cancels superseded runs on the same ref, and uses bounded job timeouts. Diagnostic artifacts are restricted to named test reports, coverage files, container logs, and browser results; retention is seven days. The temporary test stack is stopped even when a test fails. Hosted-runner benchmark timing is informational; only allocation/correctness failures fail the benchmark check.
+
+Local validation on 2026-11-11 passed 66 CTest cases in GCC Release, Clang ASan/UBSan and the GCC coverage build; three TSan concurrency cases; 11 Node test results including their parent; six Chromium cases; real bridge integration and the paper smoke test. The C++ report measured 97.1% line coverage and 71.1% branch coverage. Node 24 and the GitHub-hosted environment are configured but await their hosted run.
+
+Coverage reports measure executed code, not proof of correctness. They currently have no percentage gate: inspect uncovered branches and add meaningful cases rather than tests that only reproduce implementation details. Sanitizers and concurrency tests cannot establish correctness for every schedule, architecture or input. The suite does not claim exhaustive testing of all possible executions.
+
+### Run the additional checks locally
+
+From `client/`, with a supported Node.js installation:
+
+```bash
+npm ci
+npm test
+npm run test:bridge -- ../build/release/fastbid
+```
+
+`npm test` builds the dashboard and exercises a controlled TCP engine and UDP sender. Cases include malformed commands/responses, split replies, origin filtering, rate limiting, oversized messages, static asset restrictions, sequence filtering, feed timeout/recovery and upstream loss.
+
+Browser tests require a clean, running paper stack. To keep an existing session on port 8080 untouched, use a separate project and port. On Linux:
+
+```bash
+export FASTBID_PAPER_PORT=18080
+export PAPER_BASE_URL=http://127.0.0.1:18080
+docker compose -p fastbid-tests -f compose.paper.yml up -d --build --wait --wait-timeout 120
+cd client
+npx playwright install --with-deps chromium
+npm run test:paper -- "$PAPER_BASE_URL"
+npm run test:e2e
+cd ..
+docker compose -p fastbid-tests -f compose.paper.yml down
+```
+
+In PowerShell, set the variables with `$env:FASTBID_PAPER_PORT='18080'` and `$env:PAPER_BASE_URL='http://127.0.0.1:18080'`; pass `$env:PAPER_BASE_URL` to the smoke command. Use `npx.cmd playwright install chromium` to install the Windows browser. Browser tests run serially against a shared empty book, with failure traces/screenshots and an HTML report under `client/playwright-report/`. They cover real readiness, input labels, resting/cancelled orders, cross-session partial fills, validation messages, transport recovery and narrow-screen controls. Failed tests may leave simulated orders; recreate only the test stack before rerunning.
+
+For coverage on Linux, install `gcovr` and use a separate GCC build:
+
+```bash
+cmake -S server -B build/coverage -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON -DENABLE_COVERAGE=ON
+cmake --build build/coverage -j
+ctest --test-dir build/coverage --output-on-failure
+gcovr build/coverage --root . --filter 'server/src/' --object-directory build/coverage --xml build/coverage/coverage.xml --xml-pretty --html-details build/coverage/coverage.html --print-summary
+```
+
+Do not combine coverage instrumentation and sanitizers in one build. Keep coverage artifacts separate from other instrumented build directories when collecting results.
+
 ## Testing and performance measurement
 
 ### Memory and undefined-behavior checks
@@ -324,7 +386,7 @@ ASan [AddressSanitizer] detects many memory access errors. UBSan [UndefinedBehav
 ```bash
 cmake -S server -B build/tsan -DCMAKE_BUILD_TYPE=Debug -DBUILD_TESTS=ON -DENABLE_TSAN=ON
 cmake --build build/tsan -j
-./build/tsan/tests/fastbid_tests --gtest_filter=SPSCQueueTest.ConcurrentProducerConsumer:Stats.ConcurrentTransferAccountsForEverySample
+./build/tsan/tests/fastbid_tests --gtest_filter=SPSCQueueTest.ConcurrentProducerConsumer:Stats.ConcurrentTransferAccountsForEverySample:EngineConcurrency.*
 ```
 
 TSan [ThreadSanitizer] checks for data races. Do not combine it with ASan in one build. These tools are diagnostic checks, not proofs of correctness for every possible input.
@@ -345,7 +407,7 @@ node client/tests/paper_smoke.mjs
 
 The paper smoke test submits simulated orders and checks HTTP assets, health, restricted asset serving, acknowledgments, cancellation, two-session matching, and book snapshots. It requires client dependencies. Do not run it against a session whose test orders you want to preserve.
 
-The recorded validation on 2026-10-13 passed 33 CTest cases in Release and ASan/UBSan, two selected concurrency cases under TSan, bridge integration, and the paper-stack smoke test. These are historical results, not a claim that tests run automatically every time the application starts.
+The suite now includes forced hash collisions, inclusive/near-maximum price boundaries, sorted/aggregated top-10 snapshots, pool exhaustion, invalid replacement ownership, full-output admission checks, three reference-model seeds (60,000 generated requests), and a 20,000-request two-thread engine stress test. Recorded checks are dated in the project history; tests run through the commands above or GitHub Actions, rather than automatically on application startup.
 
 ### Benchmark scope
 

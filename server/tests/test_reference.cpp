@@ -6,13 +6,14 @@
 #include "core/matching_engine.hpp"
 #include "instrumentation/stats.hpp"
 using namespace fastbid;
-TEST(ReferenceModel, RandomizedPriceTimeMatchesAndCancels) {
+class ReferenceModel : public ::testing::TestWithParam<uint32_t> {};
+TEST_P(ReferenceModel, RandomizedPriceTimeMatchesAndCancels) {
     using E = MatchingEngine<101, 512, 2048>;
     auto in = std::make_unique<E::InboundQueue>(); auto out = std::make_unique<E::OutboundQueue>();
     auto engine = std::make_unique<E>(*in, *out, MatchingEngineConfig{{100,200,150,1}});
     struct Resting { uint64_t id, price; uint32_t qty; Side side; };
     std::vector<Resting> book;
-    std::mt19937 random(12345);
+    std::mt19937 random(GetParam());
     uint64_t next = 1;
     for (int iteration = 0; iteration < 20000; ++iteration) {
         OrderMessage m{}; m.instrument_id = 1; m.connection_fd = 1;
@@ -55,6 +56,7 @@ TEST(ReferenceModel, RandomizedPriceTimeMatchesAndCancels) {
         ASSERT_EQ(engine->book().best_bid(),bid); ASSERT_EQ(engine->book().best_ask(),ask);
     }
 }
+INSTANTIATE_TEST_SUITE_P(Seeds, ReferenceModel, ::testing::Values(7u, 12345u, 0xdeadbeefu));
 TEST(Stats, ConcurrentTransferAccountsForEverySample) {
     StatsCollector<256> stats;
     std::atomic<bool> done{false};

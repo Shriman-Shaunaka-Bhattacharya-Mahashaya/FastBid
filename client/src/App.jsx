@@ -208,12 +208,12 @@ function App() {
         <p role="status">{state.report}</p>
         <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
           <div className="form-group">
-            <label>Price ($5–$15)</label>
-            <input type="number" min="5" max="15" step="0.0001" value={orderForm.price} onChange={e => setOrderForm({...orderForm, price: e.target.value})} />
+            <label htmlFor="order-price">Price ($5–$15)</label>
+            <input id="order-price" type="number" min="5" max="15" step="0.0001" value={orderForm.price} onChange={e => setOrderForm({...orderForm, price: e.target.value})} />
           </div>
           <div className="form-group">
-            <label>Quantity</label>
-            <input type="number" min="1" max="4294967295" step="1" value={orderForm.qty} onChange={e => setOrderForm({...orderForm, qty: e.target.value})} />
+            <label htmlFor="order-quantity">Quantity</label>
+            <input id="order-quantity" type="number" min="1" max="4294967295" step="1" value={orderForm.qty} onChange={e => setOrderForm({...orderForm, qty: e.target.value})} />
           </div>
         </div>
         <div className="action-buttons">

@@ -9,6 +9,8 @@ build-*/
 node_modules/
 dist/
 coverage/
+playwright-report/
+test-results/
 .cache/
 .vscode/
 .idea/
