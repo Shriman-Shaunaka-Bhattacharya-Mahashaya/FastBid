@@ -1,0 +1,9 @@
+#pragma once
+#include <array>
+#include "core/order_book.hpp"
+namespace fastbid {
+inline constexpr std::size_t PRODUCT_LEVELS = @PRODUCT_LEVELS@;
+inline constexpr std::size_t PRODUCT_COUNT = @PRODUCT_COUNT@;
+inline constexpr std::array<OrderBookConfig, PRODUCT_COUNT> PRODUCT_BOOKS{{
+@PRODUCT_INITIALIZERS@}};
+}

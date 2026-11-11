@@ -64,7 +64,7 @@ class RuntimeContracts(unittest.TestCase):
                         time.sleep(.02)
                 with sock:
                     cases = [(1, 1, 1, 49999, 10, 1), (1, 1, 1, 150001, 10, 1),
-                             (2, 1, 1, 100000, 10, 4), (1, 0, 1, 100000, 10, 5),
+                             (999, 1, 1, 100000, 10, 4), (1, 0, 1, 100000, 10, 5),
                              (1, 1, 0, 100000, 10, 5), (1, 1, 1, 100000, 0, 5)]
                     for i, (inst, side, kind, price, qty, reason) in enumerate(cases):
                         cid = 2**63 + i

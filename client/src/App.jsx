@@ -3,6 +3,9 @@ import React, { useState, useEffect, useRef, useReducer } from 'react';
 // --- State Management ---
 // We use useReducer to manage the complex state of the order book and trades.
 const initialState = {
+  products: [],
+  selectedProduct: 1,
+  books: {},
   bids: [],
   asks: [],
   trades: [],
@@ -16,14 +19,25 @@ const initialState = {
 
 function reducer(state, action) {
   switch (action.type) {
+    case 'CATALOG':
+      return { ...state, products: action.payload };
+    case 'SELECT_PRODUCT': {
+      const snap = state.books[action.payload];
+      return { ...state, selectedProduct: action.payload, bids: snap?.bids || [], asks: snap?.asks || [],
+        stats: snap?.stats || initialState.stats, stale: !snap || Date.now() - snap.at > 2000, history: [] };
+    }
     case 'CONNECT':
       return { ...state, connected: true };
     case 'DISCONNECT':
-      return { ...state, connected: false, stale: true, bids: [], asks: [], orders: [], report: "Session disconnected. Earlier resting orders may remain; restart the paper stack for a clean book." };
+      return { ...state, connected: false, stale: true, bids: [], asks: [], books: {}, orders: [], report: "Session disconnected. Earlier resting orders may remain; restart the paper stack for a clean book." };
     case 'STALE':
-      return { ...state, stale: true };
-    case 'REPORT':
-      return { ...state, report: action.payload };
+      if (action.payload !== state.selectedProduct) return { ...state, books: { ...state.books, [action.payload]: undefined } };
+      return { ...state, stale: true, books: { ...state.books, [action.payload]: undefined } };
+    case 'REPORT': {
+      const m = action.payload;
+      const name = state.products.find(p => p.id === m.instrument_id)?.name || 'Unknown product';
+      return { ...state, report: m.message || `${m.status} ${name} order ${m.order_id}${m.reason ? ` (reason ${m.reason})` : ''}` };
+    }
     case 'EXECUTION': {
       const m = action.payload;
       let orders = state.orders;
@@ -32,18 +46,26 @@ function reducer(state, action) {
       if (m.status === 'CANCEL_ACK') orders = orders.filter(o => o.order_id !== m.order_id);
       return { ...state, orders };
     }
-    case 'BOOK_SNAPSHOT':
-      return { 
+    case 'BOOK_SNAPSHOT': {
+      const books = { ...state.books, [action.payload.instrument_id]: { ...action.payload, at: Date.now() } };
+      if (action.payload.instrument_id !== state.selectedProduct) return { ...state, books };
+      return {
         ...state, 
         bids: action.payload.bids || [], 
         asks: action.payload.asks || [],
         stale: false,
         stats: action.payload.stats || state.stats,
-        history: [...state.history, action.payload.stats?.p99 || 0].slice(-100) 
+        history: [...state.history, action.payload.stats?.p99 || 0].slice(-100),
+        books
       };
+    }
     case 'TRADE':
       // Keep last 50 trades
-      const newTrades = [action.payload, ...state.trades].slice(0, 50);
+      const counts = {};
+      const newTrades = [action.payload, ...state.trades].filter(t => {
+        counts[t.instrument_id] = (counts[t.instrument_id] || 0) + 1;
+        return counts[t.instrument_id] <= 50;
+      });
       return { ...state, trades: newTrades };
     case 'STATS':
       return { ...state, stats: action.payload };
@@ -57,11 +79,15 @@ function App() {
   const [state, dispatch] = useReducer(reducer, initialState);
   const [orderForm, setOrderForm] = useState({ price: 10, qty: 100 });
   const wsRef = useRef(null);
+  const product = state.products.find(p => p.id === state.selectedProduct);
+  const visibleTrades = state.trades.filter(t => t.instrument_id === state.selectedProduct);
+  const visibleOrders = state.orders.filter(o => o.instrument_id === state.selectedProduct);
 
   const submitOrder = (side) => {
     if (wsRef.current && wsRef.current.readyState === 1) {
       wsRef.current.send(JSON.stringify({
         type: 'new_order',
+        instrument_id: state.selectedProduct,
         side: side,
         price: Number(orderForm.price),
         quantity: Number(orderForm.qty)
@@ -85,13 +111,16 @@ function App() {
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data);
-        if (msg.type === 'ready') {
+        if (msg.type === 'catalog') {
+          dispatch({ type: 'CATALOG', payload: msg.products });
+          if (msg.products.length) dispatch({ type: 'SELECT_PRODUCT', payload: msg.products[0].id });
+        } else if (msg.type === 'ready') {
           dispatch({ type: 'CONNECT' });
         } else if (msg.type === 'stale') {
-          dispatch({ type: 'STALE' });
+          dispatch({ type: 'STALE', payload: msg.instrument_id });
         } else if (msg.type === 'error' || msg.type === 'execution_report') {
           if (msg.type === 'execution_report') dispatch({ type: 'EXECUTION', payload: msg });
-          dispatch({ type: 'REPORT', payload: msg.message || `${msg.status} order ${msg.order_id}${msg.reason ? ` (reason ${msg.reason})` : ''}` });
+          dispatch({ type: 'REPORT', payload: msg });
         } else if (msg.type === 'book_snapshot') {
           dispatch({ type: 'BOOK_SNAPSHOT', payload: msg });
         } else if (msg.type === 'trade') {
@@ -121,11 +150,20 @@ function App() {
       </header>
 
       <p>Simulated orders only. Open a second tab to trade against another session. Restart the stack to reset the book.</p>
+      <div className="card product-picker">
+        <label htmlFor="product">Product</label>
+        <select id="product" value={state.selectedProduct} disabled={!state.products.length}
+          onChange={event => dispatch({ type: 'SELECT_PRODUCT', payload: Number(event.target.value) })}>
+          {state.products.map(p => <option key={p.id} value={p.id}>{p.name} ({p.symbol})</option>)}
+        </select>
+        <p>Orders match only within {product?.name || 'the selected product'}. Prices are per unit.</p>
+      </div>
       <div className="grid">
         {/* Left Column: Stats and Trades */}
         <div className="left-panel">
           <div className="card stats-card">
             <h2>Engine Request Latency</h2>
+            <p>Engine-wide statistics across all products.</p>
             <p>Measured from engine dequeue through matching; excludes network ingress.</p>
             <div className="stat-row">
               <span>Throughput</span>
@@ -146,10 +184,10 @@ function App() {
           </div>
 
           <div className="card trades-card">
-            <h2>Recent Trades</h2>
+            <h2>Recent Trades - {product?.name}</h2>
             <div className="trade-list">
-              {state.trades.length === 0 ? <p className="empty-state">No trades yet</p> : null}
-              {state.trades.map((t, idx) => (
+              {visibleTrades.length === 0 ? <p className="empty-state">No trades yet</p> : null}
+              {visibleTrades.map((t, idx) => (
                 <div key={idx} className={`trade-row ${t.aggressor_side === 'BUY' ? 'buy' : 'sell'}`}>
                   <span>{t.price}</span>
                   <span>{t.quantity}</span>
@@ -161,7 +199,7 @@ function App() {
 
         {/* Right Column: Order Book */}
         <div className="card order-book-card">
-          <h2>Limit Order Book (Top 10)</h2>
+          <h2>Limit Order Book (Top 10) - {product?.name}</h2>
           {state.stale && <p role="status">Waiting for a fresh engine snapshot</p>}
           
           <div className="book-headers">
@@ -197,19 +235,20 @@ function App() {
 
       <div className="card">
         <h2>My Open Orders</h2>
-        {!state.orders.length && <p>No open orders in this session</p>}
-        {state.orders.map(o => <div className="stat-row" key={o.order_id}>
+        <p>{product?.name} - {visibleOrders.length} open order(s). Orders in other products remain active.</p>
+        {!visibleOrders.length && <p>No open orders in this session</p>}
+        {visibleOrders.map(o => <div className="stat-row" key={o.order_id}>
           <span>#{o.order_id} {o.side} {o.remaining} @ ${o.price}</span>
-          <button disabled={!state.connected} onClick={() => wsRef.current?.send(JSON.stringify({ type: 'cancel', order_id: o.order_id }))}>Cancel</button>
+          <button disabled={!state.connected} onClick={() => wsRef.current?.send(JSON.stringify({ type: 'cancel', order_id: o.order_id, instrument_id: o.instrument_id }))}>Cancel</button>
         </div>)}
       </div>
       <div className="card order-entry-card">
-        <h2>Interactive Order Entry</h2>
+        <h2>Interactive Order Entry - {product?.name}</h2>
         <p role="status">{state.report}</p>
         <div className="grid" style={{ gridTemplateColumns: '1fr 1fr', gap: '15px' }}>
           <div className="form-group">
-            <label htmlFor="order-price">Price ($5–$15)</label>
-            <input id="order-price" type="number" min="5" max="15" step="0.0001" value={orderForm.price} onChange={e => setOrderForm({...orderForm, price: e.target.value})} />
+            <label htmlFor="order-price">Price (${product?.min_price ?? 5}-${product?.max_price ?? 15})</label>
+            <input id="order-price" type="number" min={product?.min_price} max={product?.max_price} step="0.0001" value={orderForm.price} onChange={e => setOrderForm({...orderForm, price: e.target.value})} />
           </div>
           <div className="form-group">
             <label htmlFor="order-quantity">Quantity</label>
@@ -217,8 +256,8 @@ function App() {
           </div>
         </div>
         <div className="action-buttons">
-          <button className="btn-buy" disabled={!state.connected || state.stale} onClick={() => submitOrder('BUY')}>SUBMIT BUY ORDER</button>
-          <button className="btn-sell" disabled={!state.connected || state.stale} onClick={() => submitOrder('SELL')}>SUBMIT SELL ORDER</button>
+          <button className="btn-buy" disabled={!state.connected || state.stale || !product} onClick={() => submitOrder('BUY')}>SUBMIT BUY ORDER</button>
+          <button className="btn-sell" disabled={!state.connected || state.stale || !product} onClick={() => submitOrder('SELL')}>SUBMIT SELL ORDER</button>
         </div>
       </div>
     </div>

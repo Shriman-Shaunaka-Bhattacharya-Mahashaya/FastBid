@@ -33,6 +33,26 @@ try {
     assert.equal(a.messages.filter(m=>m.type==='trade').length,1,'Trade must not be broadcast twice');
     assert.equal(a.messages.filter(m=>m.status==='ACK').length,1,'Reports must stay on their owner connection');
     assert(!a.messages.some(m=>m.type==='latency_stats'),'No synthetic stats stream');
+    // Same prices on different products must not cross. Explicitly test wrong-product cancel.
+    a.messages=[]; b.messages=[];
+    a.send(JSON.stringify({type:'new_order',instrument_id:2,side:'BUY',price:12,quantity:8}));
+    await waitUntil(()=>a.messages.some(m=>m.status==='ACK'));
+    const banana=a.messages.find(m=>m.status==='ACK'); assert.equal(banana.instrument_id,2);
+    b.send(JSON.stringify({type:'new_order',instrument_id:3,side:'SELL',price:12,quantity:8}));
+    await waitUntil(()=>b.messages.some(m=>m.status==='ACK'));
+    const orange=b.messages.find(m=>m.status==='ACK');
+    assert.notEqual(banana.order_id,orange.order_id);
+    await waitUntil(()=>a.messages.some(m=>m.type==='book_snapshot'&&m.instrument_id===2&&m.bids.some(l=>l.price===12&&l.qty===8)));
+    await waitUntil(()=>b.messages.some(m=>m.type==='book_snapshot'&&m.instrument_id===3&&m.asks.some(l=>l.price===12&&l.qty===8)));
+    assert(!a.messages.some(m=>m.status==='FILL')); assert(!b.messages.some(m=>m.status==='FILL'));
+    a.send(JSON.stringify({type:'cancel',instrument_id:3,order_id:banana.order_id}));
+    await waitUntil(()=>a.messages.some(m=>m.status==='REJECT'&&m.reason===3));
+    b.send(JSON.stringify({type:'new_order',instrument_id:2,side:'SELL',price:12,quantity:3}));
+    await waitUntil(()=>a.messages.some(m=>m.status==='FILL'&&m.instrument_id===2&&m.remaining===5));
+    a.send(JSON.stringify({type:'cancel',instrument_id:2,order_id:banana.order_id}));
+    b.send(JSON.stringify({type:'cancel',instrument_id:3,order_id:orange.order_id}));
+    await waitUntil(()=>a.messages.some(m=>m.status==='CANCEL_ACK'&&m.instrument_id===2));
+    await waitUntil(()=>b.messages.some(m=>m.status==='CANCEL_ACK'&&m.instrument_id===3));
     const rejected=new WebSocket(`ws://127.0.0.1:${wsPort}`,{origin:'https://untrusted.invalid'});sockets.push(rejected);
     await once(rejected,'error');
     console.log('Bridge integration passed: origin gate, real depth, validated orders, private reports, ownership, single trade broadcast');

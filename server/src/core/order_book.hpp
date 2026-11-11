@@ -90,6 +90,7 @@ public:
     // Called only by the engine owner at a completed request boundary.
     void snapshot(MarketSnapshot& out) const noexcept {
         out = MarketSnapshot{};
+        out.header.instrument_id = config_.instrument_id;
         if (asks_) {
             const auto start = ask_ - config_.min_price;
             for (std::size_t w = start / 64; w < WORDS && out.ask_count < 10; ++w) {

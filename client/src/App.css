@@ -264,3 +264,7 @@ h2 {
 .btn-buy:active, .btn-sell:active {
   transform: scale(0.98);
 }
+
+.product-picker { margin-bottom: 24px; }
+.product-picker label { margin-right: 12px; }
+.product-picker select { background: #171e2b; color: #edf2f7; padding: 10px 14px; border: 1px solid #475569; border-radius: 6px; max-width: 100%; }

@@ -24,13 +24,13 @@ async function freeUDP() {
     const socket = dgram.createSocket('udp4'); socket.bind(0, '127.0.0.1'); await once(socket, 'listening');
     const port = socket.address().port; socket.close(); return port;
 }
-function snapshot(sequence, count = 1) {
-    const b = Buffer.alloc(384);
-    b.writeUInt32LE(0x31444246); b.writeUInt16LE(1, 4); b.writeUInt16LE(2, 6);
-    b.writeBigUInt64LE(BigInt(sequence), 8); b.writeUInt32LE(count, 16);
-    b.writeBigUInt64LE(100001n, 24); b.writeBigUInt64LE(17n, 32);
-    b.writeBigUInt64LE(100n, 344); b.writeBigUInt64LE(200n, 352); b.writeBigUInt64LE(300n, 360);
-    b.writeBigUInt64LE(10n, 368); return b;
+function snapshot(sequence, count = 1, instrument = 1) {
+    const b = Buffer.alloc(392);
+    b.writeUInt32LE(0x31444246); b.writeUInt16LE(2, 4); b.writeUInt16LE(2, 6);
+    b.writeBigUInt64LE(BigInt(sequence), 8); b.writeUInt32LE(instrument, 16); b.writeUInt32LE(count, 24);
+    b.writeBigUInt64LE(100001n, 32); b.writeBigUInt64LE(17n, 40);
+    b.writeBigUInt64LE(100n, 352); b.writeBigUInt64LE(200n, 360); b.writeBigUInt64LE(300n, 368);
+    b.writeBigUInt64LE(10n, 376); return b;
 }
 
 test('bridge contracts with a controlled engine and UDP source', { timeout: 45000 }, async t => {
@@ -112,6 +112,8 @@ test('bridge contracts with a controlled engine and UDP source', { timeout: 4500
             { quantity: 1.5 }, { quantity: '1' }, { quantity: 4294967296 }]) requests.push(JSON.stringify({ ...good, ...patch }));
         for (const id of [0, '', '-1', '0', '1.1', '18446744073709551616'])
             requests.push(JSON.stringify({ type: 'cancel', order_id: id }));
+        for (const instrument_id of [0, 999, '2', null, -1, 1.5])
+            requests.push(JSON.stringify({ ...good, instrument_id }));
         const previous = a.messages.filter(m => m.type === 'error').length;
         for (const request of requests) a.send(request);
         await until(() => a.messages.filter(m => m.type === 'error').length === previous + requests.length, 'Missing validation errors');
@@ -129,27 +131,42 @@ test('bridge contracts with a controlled engine and UDP source', { timeout: 4500
         await until(() => frames.at(-1)[2] === 2, 'Cancel was not packed');
         assert.equal(frames.at(-1).length, 16); assert.equal(frames.at(-1).readBigUInt64LE(4), 9007199254740993n);
     });
+    await t.test('catalog and nondefault product route through TCP and ACK metadata', async () => {
+        assert.deepEqual(a.messages.find(m => m.type === 'catalog').products.map(p => p.id), [1, 2, 3]);
+        const ws = await connect();
+        ws.send(JSON.stringify({ type: 'new_order', instrument_id: 2, side: 'BUY', price: 10, quantity: 3 }));
+        await until(() => ws.messages.some(m => m.status === 'ACK'), 'No product ACK');
+        assert.equal(frames.at(-1).readUInt32LE(12), 2);
+        assert.equal(ws.messages.find(m => m.status === 'ACK').instrument_id, 2);
+        ws.close();
+    });
     await t.test('invalid UDP, duplicate sequence filtering and real snapshot readiness', async () => {
         const before = a.messages.length;
         await sendUDP(Buffer.alloc(5));
         const badMagic = snapshot(1); badMagic.writeUInt32LE(0); await sendUDP(badMagic);
         const badVersion = snapshot(2); badVersion.writeUInt16LE(99, 4); await sendUDP(badVersion);
         await sendUDP(snapshot(3, 11)); await delay(50);
+        await sendUDP(snapshot(4, 1, 999));
         assert.equal(a.messages.slice(before).filter(m => m.type === 'book_snapshot').length, 0);
         await sendUDP(snapshot(100));
+        await until(() => a.messages.some(m => m.type === 'book_snapshot' && m.instrument_id === 1), 'No first-product snapshot');
+        assert.equal((await fetch(`${base}/healthz`)).status, 503, 'Other products must also be fresh');
+        await sendUDP(snapshot(101, 0, 2)); await sendUDP(snapshot(102, 0, 3));
         await until(() => a.messages.some(m => m.type === 'book_snapshot'), 'No valid snapshot');
         const snap = a.messages.find(m => m.type === 'book_snapshot');
+        assert.equal(snap.instrument_id, 1);
         assert.deepEqual(snap.bids, [{ price: 10.0001, qty: 17 }]); assert.equal(snap.stats.p99, 200);
         assert.equal((await fetch(`${base}/healthz`)).status, 200);
-        const count = a.messages.filter(m => m.type === 'book_snapshot').length;
+        const count = a.messages.filter(m => m.type === 'book_snapshot' && m.instrument_id === 1).length;
         await sendUDP(snapshot(100)); await sendUDP(snapshot(99)); await delay(50);
-        assert.equal(a.messages.filter(m => m.type === 'book_snapshot').length, count);
+        assert.equal(a.messages.filter(m => m.type === 'book_snapshot' && m.instrument_id === 1).length, count);
     });
     await t.test('feed timeout becomes unhealthy and sequence reset recovers', async () => {
         await until(() => a.messages.some(m => m.type === 'stale'), 'No stale notification', 6000);
         assert.equal((await fetch(`${base}/healthz`)).status, 503);
         await sendUDP(snapshot(1));
-        await until(() => a.messages.filter(m => m.type === 'book_snapshot').length === 2, 'Reset sequence was not accepted');
+        await sendUDP(snapshot(2, 0, 2)); await sendUDP(snapshot(3, 0, 3));
+        await until(() => a.messages.filter(m => m.type === 'book_snapshot' && m.instrument_id === 1).length === 2, 'Reset sequence was not accepted');
         assert.equal((await fetch(`${base}/healthz`)).status, 200);
     });
     await t.test('command burst rate is bounded', async () => {

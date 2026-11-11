@@ -2,26 +2,42 @@
 #include <cassert>
 #include <cstdint>
 #include <cstdlib>
+#include <array>
+#include <optional>
+#include <span>
 #include "core/order_book.hpp"
 #include "memory/object_pool.hpp"
 #include "memory/spsc_queue.hpp"
 
 namespace fastbid {
-struct MatchingEngineConfig { OrderBookConfig book_config; };
+struct MatchingEngineConfig {
+    OrderBookConfig book_config;
+    std::span<const OrderBookConfig> additional_books{};
+};
 
 // Single engine-thread owner. Matching can pause between fills when outbound
 // capacity runs out. The pending aggressor retains priority over later requests.
 // A processing call is bounded by batch_size requests AND batch_size fills.
-template <std::size_t MaxLevels = 100001, std::size_t PoolCapacity = 1048576, std::size_t QueueSize = 65536>
+template <std::size_t MaxLevels = 100001, std::size_t PoolCapacity = 1048576, std::size_t QueueSize = 65536, std::size_t MaxProducts = 1>
 class MatchingEngine {
     static_assert(QueueSize >= 4);
+    static_assert(MaxProducts > 0);
 public:
     using InboundQueue = SPSCQueue<OrderMessage, QueueSize>;
     using OutboundQueue = SPSCQueue<EngineEvent, QueueSize>;
     using Book = OrderBook<MaxLevels, PoolCapacity>;
     using Pool = ObjectPool<Order, PoolCapacity>;
     MatchingEngine(InboundQueue& in, OutboundQueue& out, const MatchingEngineConfig& cfg) noexcept
-        : inbound_(in), outbound_(out), book_(cfg.book_config) {}
+        : inbound_(in), outbound_(out) {
+        if (cfg.additional_books.size() >= MaxProducts) std::abort();
+        books_[0].emplace(cfg.book_config);
+        product_count_ = 1;
+        for (const auto& config : cfg.additional_books) {
+            if (book(config.instrument_id)) std::abort();
+            books_[product_count_++].emplace(config);
+        }
+        book_ = &*books_[0];
+    }
     MatchingEngine(const MatchingEngine&) = delete;
     MatchingEngine& operator=(const MatchingEngine&) = delete;
 
@@ -31,25 +47,25 @@ public:
         while (true) {
             if (pending_) {
                 const bool buy = pending_->side == Side::BUY;
-                const auto price = buy ? book_.best_ask() : book_.best_bid();
+                const auto price = buy ? book_->best_ask() : book_->best_bid();
                 const bool crosses = buy ? pending_->price >= price : pending_->price <= price;
                 if (!pending_->remaining_qty || !crosses) {
                     if (pending_->remaining_qty) {
-                        if (!book_.add_order(pending_)) std::abort(); // internal invariant
+                        if (!book_->add_order(pending_)) std::abort(); // internal invariant
                     } else pool_.deallocate(pending_);
                     pending_ = nullptr;
                     if (resuming) break;
                 } else {
                     if (outbound_.available() < 2 || fills == batch_size) break;
-                    Order* resting = book_.get_level(price).front();
+                    Order* resting = book_->get_level(price).front();
                     const auto qty = pending_->remaining_qty < resting->remaining_qty ? pending_->remaining_qty : resting->remaining_qty;
                     assert(qty);
                     pending_->remaining_qty -= qty; resting->remaining_qty -= qty;
-                    book_.get_level(price).total_quantity -= qty;
+                    book_->get_level(price).total_quantity -= qty;
                     const auto trade = next_trade_id_++;
                     emit_fill(pending_, trade, price, qty, pending_->side);
                     emit_fill(resting, trade, price, qty, pending_->side);
-                    if (!resting->remaining_qty) { book_.remove_order(resting); pool_.deallocate(resting); }
+                    if (!resting->remaining_qty) { book_->remove_order(resting); pool_.deallocate(resting); }
                     ++fills;
                     continue;
                 }
@@ -58,15 +74,19 @@ public:
             OrderMessage msg{};
             if (!inbound_.try_pop(msg)) break;
             ++processed;
-            if (msg.instrument_id != book_.config().instrument_id) { reject(msg, 4); continue; }
+            Book* selected = nullptr;
+            for (std::size_t i = 0; i < product_count_; ++i)
+                if (books_[i]->config().instrument_id == msg.instrument_id) { selected = &*books_[i]; break; }
+            if (!selected) { reject(msg, 4); continue; }
+            book_ = selected;
             if (msg.type == MessageType::NEW_ORDER) start_order(msg);
             else if (msg.type == MessageType::CANCEL || msg.type == MessageType::MODIFY) {
-                Order* old = book_.find_order(msg.order_id);
+                Order* old = book_->find_order(msg.order_id);
                 if (!old) { reject(msg, 3); continue; }
                 if (old->connection_fd != msg.connection_fd) { reject(msg, 7); continue; }
                 // Validate replacement before mutating the old order.
                 if (msg.type == MessageType::MODIFY && !validate(msg)) continue;
-                book_.remove_order(old);
+                book_->remove_order(old);
                 auto evt = event_for(old, EngineEventType::CANCEL_ACK); push(evt);
                 pool_.deallocate(old);
                 if (msg.type == MessageType::MODIFY) start_order(msg);
@@ -75,13 +95,18 @@ public:
         return processed;
     }
     [[nodiscard]] bool has_pending() const noexcept { return pending_ != nullptr; }
-    [[nodiscard]] const Book& book() const noexcept { return book_; }
+    [[nodiscard]] const Book& book() const noexcept { return *books_[0]; }
+    [[nodiscard]] const Book* book(uint32_t instrument_id) const noexcept {
+        for (std::size_t i = 0; i < product_count_; ++i)
+            if (books_[i]->config().instrument_id == instrument_id) return &*books_[i];
+        return nullptr;
+    }
     [[nodiscard]] const Pool& pool() const noexcept { return pool_; }
     [[nodiscard]] uint64_t next_order_id() const noexcept { return next_order_id_; }
     [[nodiscard]] uint64_t next_trade_id() const noexcept { return next_trade_id_; }
 private:
     bool validate(const OrderMessage& msg) noexcept {
-        if (!book_.is_price_valid(msg.price)) { reject(msg, 1); return false; }
+        if (!book_->is_price_valid(msg.price)) { reject(msg, 1); return false; }
         if ((msg.side != Side::BUY && msg.side != Side::SELL) || msg.order_type != OrderType::LIMIT || !msg.quantity) {
             reject(msg, 5); return false;
         }
@@ -114,7 +139,10 @@ private:
         if (!outbound_.try_push(e)) std::abort();
     }
     InboundQueue& inbound_; OutboundQueue& outbound_;
-    Book book_; Pool pool_;
+    std::array<std::optional<Book>, MaxProducts> books_;
+    std::size_t product_count_ = 0;
+    Book* book_ = nullptr;
+    Pool pool_;
     Order* pending_ = nullptr;
     uint64_t next_order_id_ = 1, next_trade_id_ = 1;
 };

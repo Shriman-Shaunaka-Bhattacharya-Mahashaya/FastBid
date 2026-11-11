@@ -8,6 +8,7 @@
 #include <thread>
 #include <sys/mman.h>
 #include "core/matching_engine.hpp"
+#include "core/product_catalog.hpp"
 #include "instrumentation/stats.hpp"
 #include "platform/cycle_clock.hpp"
 #include "platform/core_allocator.hpp"
@@ -28,18 +29,19 @@ uint16_t port(const char* key, const char* fallback) {
 int main() {
     using namespace fastbid;
     using Clock = std::chrono::steady_clock;
-    using Engine = MatchingEngine<100001, 1048576, 65536>;
+    using Engine = MatchingEngine<PRODUCT_LEVELS, 1048576, 65536, PRODUCT_COUNT>;
     std::setvbuf(stdout, nullptr, _IONBF, 0);
     std::signal(SIGINT, signal_handler); std::signal(SIGTERM, signal_handler);
     CycleClock::calibrate();
     CoreAllocator allocator;
     static Engine::InboundQueue inbound;
     static Engine::OutboundQueue outbound;
-    static SPSCQueue<MarketSnapshot, 8> snapshots;
+    static SPSCQueue<MarketSnapshot, 64> snapshots;
     static StatsCollector<> stats;
     std::atomic<bool> ingress_stopped{false}, engine_done{false};
     std::atomic<uint64_t> processed_total{0};
-    auto engine = std::make_unique<Engine>(inbound, outbound, MatchingEngineConfig{{50000, 150000, 100000, 1}});
+    auto engine = std::make_unique<Engine>(inbound, outbound,
+        MatchingEngineConfig{PRODUCT_BOOKS[0], std::span(PRODUCT_BOOKS).subspan(1)});
     TCPGateway gateway(inbound, outbound, {env("FASTBID_TCP_HOST", "127.0.0.1"), port("FASTBID_TCP_PORT", "9000"), 1024});
     UDPPublisher publisher({env("FASTBID_UDP_MCAST_ADDR", "239.255.0.1"), port("FASTBID_UDP_MCAST_PORT", "5000")});
     gateway.init(); publisher.init();
@@ -56,7 +58,10 @@ int main() {
             if (measuring && !engine->has_pending()) { stats.record(CycleClock::to_nanoseconds(CycleClock::now() - request_start)); measuring = false; }
             const auto now = Clock::now();
             if (!engine->has_pending() && now >= next_snapshot) {
-                MarketSnapshot snap{}; engine->book().snapshot(snap); (void)snapshots.try_push(snap);
+                for (const auto& product : PRODUCT_BOOKS) {
+                    MarketSnapshot snap{}; engine->book(product.instrument_id)->snapshot(snap);
+                    (void)snapshots.try_push(snap);
+                }
                 next_snapshot = now + std::chrono::milliseconds(50);
             }
             if (!n && (!engine->has_pending() || outbound.available() < 2)) std::this_thread::yield();
@@ -64,7 +69,9 @@ int main() {
         engine_done.store(true, std::memory_order_release);
     });
     CoreAllocator::apply_to_current_thread(allocator.get_io_assignment());
-    MarketSnapshot latest{}; LatencyStats latency{}; bool snapshot_ready = false;
+    std::array<MarketSnapshot, PRODUCT_COUNT> latest{};
+    std::array<bool, PRODUCT_COUNT> snapshot_ready{};
+    LatencyStats latency{};
     auto last_stats = Clock::now(), next_publish = last_stats, shutdown_deadline = Clock::time_point::max();
     uint64_t previous_count = 0;
     std::puts("[Main] Ready; SIGINT/SIGTERM stops admission and drains accepted requests.");
@@ -74,7 +81,14 @@ int main() {
         const auto activity = gateway.poll(!stopping);
         EngineEvent e{}; std::size_t reports = 0;
         while (reports < 4096 && outbound.try_pop(e)) { gateway.send_event(e); publisher.publish_event(e); ++reports; }
-        while (snapshots.try_pop(latest)) snapshot_ready = true;
+        MarketSnapshot incoming{};
+        while (snapshots.try_pop(incoming)) {
+            for (std::size_t i = 0; i < PRODUCT_COUNT; ++i) {
+                if (PRODUCT_BOOKS[i].instrument_id == incoming.header.instrument_id) {
+                    latest[i] = incoming; snapshot_ready[i] = true; break;
+                }
+            }
+        }
         const auto now = Clock::now();
         if (now - last_stats >= std::chrono::seconds(1)) {
             latency = stats.compute();
@@ -86,10 +100,14 @@ int main() {
                 static_cast<unsigned long long>(latency.p50_ns), static_cast<unsigned long long>(latency.p99_ns),
                 static_cast<unsigned long long>(stats.dropped()), static_cast<unsigned long long>(publisher.dropped()));
         }
-        if (snapshot_ready && now >= next_publish) {
-            snapshot_ready = false;
-            latest.p50_ns = latency.p50_ns; latest.p99_ns = latency.p99_ns; latest.orders_per_sec = latency.orders_per_sec;
-            latest.samples = latency.sample_count; latest.dropped_samples = stats.dropped(); publisher.publish_snapshot(latest);
+        if (now >= next_publish) {
+            for (std::size_t i = 0; i < PRODUCT_COUNT; ++i) {
+                if (!snapshot_ready[i]) continue;
+                snapshot_ready[i] = false;
+                auto& snap = latest[i];
+                snap.p50_ns = latency.p50_ns; snap.p99_ns = latency.p99_ns; snap.orders_per_sec = latency.orders_per_sec;
+                snap.samples = latency.sample_count; snap.dropped_samples = stats.dropped(); publisher.publish_snapshot(snap);
+            }
             next_publish = now + std::chrono::milliseconds(50);
         }
         if (engine_done.load(std::memory_order_acquire) && outbound.empty()) {
