@@ -70,9 +70,9 @@ try:
     found = False
     while time.monotonic()<deadline:
         msg = udp.recv(2048)
-        if len(msg) == 384 and struct.unpack_from('<IHH', msg) == (0x31444246,1,2):
-            bids = struct.unpack_from('<I',msg,16)[0]
-            if bids and struct.unpack_from('<QQ',msg,24) == (90000,10): found = True; break
+        if len(msg) == 392 and struct.unpack_from('<IHH', msg) == (0x31444246,2,2):
+            bids = struct.unpack_from('<I',msg,24)[0]
+            if msg[16:20] == struct.pack('<I', 1) and bids and struct.unpack_from('<QQ',msg,32) == (90000,10): found = True; break
     assert found, 'No matching real snapshot'
     p.send_signal(signal.SIGTERM); assert p.wait(timeout=10) == 0
     print('Socket integration passed: framing, fills, ownership, IDs, 2000 pipelined requests, snapshots, shutdown')

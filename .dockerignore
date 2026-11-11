@@ -1,0 +1,16 @@
+**
+!server/
+!server/CMakeLists.txt
+!server/src/
+!server/src/**
+!client/
+!client/package.json
+!client/package-lock.json
+!client/ws_bridge.js
+!client/catalog.mjs
+!client/index.html
+!client/vite.config.js
+!client/src/
+!client/src/**
+!config/
+!config/products.json

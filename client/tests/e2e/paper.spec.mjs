@@ -78,3 +78,33 @@ test('narrow viewport keeps trading controls usable', async ({ page }) => {
     await expect(page.getByLabel('Price')).toBeVisible();
     await expect(page.getByRole('button', { name: 'SUBMIT SELL ORDER' })).toBeEnabled();
 });
+
+test('product switching preserves orders and prevents cross-product matches', async ({ page, context }) => {
+    const other = await context.newPage(); await ready(page); await ready(other);
+    await expect(page.getByLabel('Product', { exact: true })).toHaveValue('1');
+    await submit(page, 'BUY', 11.0003, 20);
+    await expect(openOrders(page)).toContainText('BUY 20 @ $11.0003');
+    await other.getByLabel('Product', { exact: true }).selectOption('2');
+    await submit(other, 'SELL', 11.0003, 20);
+    await expect(openOrders(other)).toContainText('SELL 20 @ $11.0003');
+    // These prices cross, but different products must both remain resting.
+    await expect(openOrders(page)).toContainText('BUY 20 @ $11.0003');
+    await expect(page.locator('.trade-row')).toHaveCount(0);
+    await page.getByLabel('Product', { exact: true }).selectOption('2');
+    await expect(openOrders(page)).toContainText('No open orders');
+    await expect(page.locator('.asks')).toContainText('11.0003');
+    await submit(page, 'BUY', 11.0003, 7);
+    await expect(openOrders(other)).toContainText('SELL 13 @ $11.0003');
+    await expect(page.locator('.trade-row')).toHaveCount(1);
+    await page.getByLabel('Product', { exact: true }).selectOption('1');
+    await expect(openOrders(page)).toContainText('BUY 20 @ $11.0003');
+    await expect(page.locator('.trade-row')).toHaveCount(0);
+    await openOrders(page).getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(openOrders(page)).toContainText('No open orders');
+    await openOrders(other).getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(openOrders(other)).toContainText('No open orders');
+    await page.getByLabel('Product', { exact: true }).selectOption('3');
+    await expect(page.locator('.bids .book-row')).toHaveCount(0);
+    await expect(page.locator('.asks .book-row')).toHaveCount(0);
+    await other.close();
+});

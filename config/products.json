@@ -1,0 +1,7 @@
+{
+  "products": [
+    { "id": 1, "symbol": "APPLE", "name": "Apples", "min_price_ticks": 50000, "max_price_ticks": 150000, "reference_price_ticks": 100000 },
+    { "id": 2, "symbol": "BANANA", "name": "Bananas", "min_price_ticks": 50000, "max_price_ticks": 150000, "reference_price_ticks": 100000 },
+    { "id": 3, "symbol": "ORANGE", "name": "Oranges", "min_price_ticks": 50000, "max_price_ticks": 150000, "reference_price_ticks": 100000 }
+  ]
+}

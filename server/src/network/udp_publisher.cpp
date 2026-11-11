@@ -22,6 +22,7 @@ void UDPPublisher::publish_event(const EngineEvent& e) noexcept {
     if (e.type != EngineEventType::TRADE || e.trade_id == last_trade_) return;
     last_trade_ = e.trade_id;
     MarketTrade t{}; t.header.kind = 1; t.header.sequence = ++sequence_;
+    t.header.instrument_id = e.instrument_id;
     t.trade_id = e.trade_id; t.price = e.price; t.quantity = e.fill_quantity; t.side = e.aggressor_side;
     send_packet(&t, sizeof(t));
 }

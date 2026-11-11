@@ -2,12 +2,13 @@
 
 FastBid is a C++20 limit order book matching engine with a binary TCP gateway, a Node.js WebSocket bridge, and a React dashboard. It provides a complete **local paper-trading environment**: submit simulated limit orders, watch them match, inspect the book, and cancel your session's remaining orders.
 
-The focus is predictable order processing: preallocated memory, one owner of the book, bounded queues, price-time priority, and measured latency. The project is not connected to an exchange and does not manage real funds, balances, or positions.
+The focus is predictable order processing: preallocated memory, one owner of the book, bounded queues, price-time priority, and measured latency. The default product catalog contains Apples, Bananas, and Oranges. Orders match only with the same product. The project is not connected to an exchange and does not manage real funds, balances, or positions.
 
 ## Contents
 
 - [Capabilities and scope](#capabilities-and-scope)
 - [Quick start: local paper trading](#quick-start-local-paper-trading)
+- [Products and catalog configuration](#products-and-catalog-configuration)
 - [Try a complete trading workflow](#try-a-complete-trading-workflow)
 - [Architecture](#architecture)
 - [Matching rules and data structures](#matching-rules-and-data-structures)
@@ -25,7 +26,7 @@ The focus is predictable order processing: preallocated memory, one owner of the
 
 | Area | Implemented behavior |
 | --- | --- |
-| Matching | One instrument; limit BUY/SELL orders; best price first, then arrival order |
+| Matching | Independent product books; limit BUY/SELL orders; best price first, then arrival order |
 | Execution | Partial fills, multiple fills, execution at the resting order's price |
 | Cancellation | The current owner session can cancel its resting orders |
 | Modification | Internal cancel-and-replace implementation; not exposed over TCP or the dashboard |
@@ -88,17 +89,37 @@ To reset on Linux, run `down`, then the startup command. The PowerShell `reset` 
 
 **State is volatile [kept only in process memory].** Stop, reset, or an engine restart discards the book. There is no recovery from disk.
 
+## Products and catalog configuration
+
+Use the **Product** selector above the dashboard to choose what to buy or sell. The selected product controls order entry, depth, recent trades, and the visible open-order list. Switching products preserves your orders in every other product. Fills and cancellation reports remain attached to their original product even if you switch while waiting for a reply. A client can trade multiple products within the same session.
+
+| Product ID | Symbol | Product | Default price band per unit |
+| --- | --- | --- | --- |
+| 1 | APPLE | Apples | $5-$15 |
+| 2 | BANANA | Bananas | $5-$15 |
+| 3 | ORANGE | Oranges | $5-$15 |
+
+A BUY for Apples never matches a SELL for Bananas, even at the same price. To try this, submit an Apples BUY in one tab and a Bananas SELL in another; both should remain open. Select Bananas in the first tab and submit a BUY to match that seller. Return to Apples to manage the original bid. Cancels must identify the original product and owning session; changing the selector does not transfer orders between books.
+
+[`config/products.json`](config/products.json) is the source of truth for IDs, names, symbols and price bands. CMake generates fixed engine configuration from it; the bridge reads the same file and sends the catalog to browsers. Price fields in this file are integer ticks (dollars multiplied by 10,000). IDs must be distinct positive 32-bit integers. Each product needs a valid reference price within its band; the band can contain at most 100,001 integer levels. The current implementation supports 1-16 configured products, subject to available memory. IDs should remain stable when changing names or symbols.
+
+Add or edit an entry, then rebuild **both** services with `paper.ps1 start` or the Compose startup command. Catalog changes are not hot-reloaded. Recreating the engine discards the current simulated book, so finish or intentionally discard your session before applying a catalog update. The supplied browser/isolation scenarios use the default three-product catalog.
+
+One matching thread serializes all products, sharing the existing order pool, inbound queue, outbound queue and global order/trade ID counters. Each product has separate price levels, occupancy bitmap and order index. A full shared pool can reject requests for any product. A pending sweep retains priority across the shared input stream. More products reserve more book/index memory; they do not create a matching thread per product. Latency and throughput statistics remain engine-wide, while depth, trades and freshness are product-specific. The bridge's health endpoint requires fresh snapshots for every configured product.
+
+Market-data packets now use version 2 and include product IDs. Update custom UDP subscribers alongside the engine/bridge. Binary TCP NEW and CANCEL messages retain their existing sizes and already include `instrument_id`; see [protocol details](docs/PROTOCOL.md).
+
 ## Try a complete trading workflow
 
-1. Open the dashboard in two browser tabs. Each tab receives a separate trading session.
+1. Open the dashboard in two browser tabs. Each tab receives a separate trading session. Select **Apples** in both tabs.
 2. In tab A, submit **BUY**, price **10**, quantity **100**. The order should appear in **My Open Orders** and bid depth.
 3. In tab B, submit **SELL**, price **10**, quantity **40**.
 4. The engine trades 40 units at $10. Both tabs receive their own fill report. Tab A has 60 units left.
 5. In tab A, click **Cancel**. Wait for `CANCEL_ACK`; the remaining order disappears.
 
-The book begins empty, so an order will rest until a compatible opposite order arrives. There is no automated market maker supplying liquidity.
+Each product book begins empty, so an order will rest until a compatible opposite order for that product arrives. There is no automated market maker supplying liquidity.
 
-Prices in the UI are dollar values, not internal integer ticks. The allowed band is $5 through $15, with up to four decimal places. Quantity must be a positive whole number.
+Prices in the UI are dollar values, not internal integer ticks. The default catalog gives each product a $5 through $15 per-unit price band, with up to four decimal places. Quantity must be a positive whole number.
 
 Keep the tab open while managing its orders. Refreshing or reconnecting creates a new session; it cannot recover cancellation access to the old session's orders. Reset the paper stack to clear those orders. An interrupted connection can leave acceptance uncertain, so the dashboard never automatically resubmits requests.
 
@@ -124,7 +145,7 @@ flowchart LR
 
 **IO thread:** the C++ main thread accepts TCP connections using Linux `epoll`, parses complete frames, queues requests, sends reports, publishes market data, and computes diagnostic percentiles. It owns the sockets.
 
-**Matching thread:** owns the order pool and book. It validates requests, matches orders, and emits events. No other thread directly mutates the book.
+**Matching thread:** owns the shared order pool and all product books. It validates requests, matches orders, and emits events. No other thread directly mutates the book.
 
 Additional bounded queues transfer engine-owned snapshots and latency samples to IO. The separation prevents the networking and monitoring code from reading mutable book state concurrently.
 
@@ -147,7 +168,7 @@ For example, a resting SELL at $9.90 can match an incoming BUY limited to $10.00
 | Occupancy bitmap | One bit per price indicates whether it contains orders, allowing scans to skip empty groups |
 | SPSC ring buffers | Transfer fixed-size values between threads without a mutex; each queue has exactly one producer and consumer |
 
-The implementation uses one price-level array. A correctly matched resting book never has crossing buy/sell prices, so opposite resting sides do not need to coexist at the same price. Prices are fixed-point integers: `$10.0001` is represented as `100001`, avoiding floating-point comparison errors.
+Each product book uses one price-level array. A correctly matched resting book never has crossing buy/sell prices, so opposite resting sides do not need to coexist at the same price. Prices are fixed-point integers: `$10.0001` is represented as `100001`, avoiding floating-point comparison errors.
 
 Direct level lookup and pool slot allocation are constant-time operations. Order-ID lookup is expected constant time but can degrade with collisions. Removing a known list node is constant time; locating a new best price may scan bitmap words. Matching an order that fills many resting orders necessarily performs work for each fill.
 
@@ -175,6 +196,7 @@ There is no database, `io_uring` integration, kernel-bypass implementation, or C
 FastBid/
   README.md
   .github/workflows/ci.yml       Automated build, sanitizer, integration and browser checks
+  config/products.json          Shared product identities and integer price bands
   compose.paper.yml             Local complete paper-trading stack
   paper.ps1                     Windows lifecycle helper
   docs/PROTOCOL.md              Binary layouts and message semantics
@@ -275,11 +297,11 @@ Current limits:
 
 | Setting | Value |
 | --- | --- |
-| Instrument | `1` |
+| Products | IDs `1`, `2`, `3`; shared catalog; up to 16 configured |
 | Price band | `50000` to `150000` ticks inclusive, equivalent to $5-$15 |
 | Reference price | `100000` ticks, equivalent to $10 |
-| Price levels | `100001` |
-| Order pool | `1048576` slots, including any pending aggressor |
+| Price levels | Up to `100001` per product |
+| Order pool | `1048576` shared slots across all products, including the pending aggressor |
 | Inbound/outbound queues | `65536` slots each, `65535` usable |
 | TCP clients | `1024` |
 | Per-client TCP receive/send buffers | 8 KiB / 64 KiB |
@@ -288,7 +310,7 @@ Current limits:
 | Bridge command rate | 100/second/client, with a 100-command burst |
 | Snapshot depth and interval | Top 10 per side, approximately 50 ms when engine progress allows |
 
-Core capacities are compiled into the program; they are not all environment-configurable. Budget roughly 160 MiB for engine/queue state, plus connection buffers, kernel socket buffers, runtime overhead, and frontend services. Busy polling can use substantial CPU even when idle. CPU affinity uses the process's allowed CPU mask and normal scheduling. Optional memory locking does not lock future allocations and can fail without sufficient privileges.
+Core capacities are compiled into the program; they are not all environment-configurable. Budget roughly 190 MiB with the default three-product catalog for engine/queue state, plus connection buffers, kernel socket buffers, runtime overhead, and frontend services. Busy polling can use substantial CPU even when idle. CPU affinity uses the process's allowed CPU mask and normal scheduling. Optional memory locking does not lock future allocations and can fail without sufficient privileges.
 
 ## Protocols and overload behavior
 
@@ -310,7 +332,7 @@ When report capacity is insufficient, matching pauses between fills and retains 
 
 TCP preserves byte order but not message boundaries; the parser handles split and combined frames. Invalid lengths/types/reserved fields close the connection. Engine validation rejects invalid prices, quantities, types, instruments, and unauthorized cancellation.
 
-Public UDP data is best effort [delivery is not guaranteed]. One trade packet is published per match, while each participant receives a private fill. Full top-10 snapshots recover displayed depth after missed packets, but there is no replay for missed trades.
+Public UDP data is best effort [delivery is not guaranteed]. One product-tagged trade packet is published per match, while each participant receives a private fill. Full top-10 snapshots recover displayed depth after missed packets, but there is no replay for missed trades.
 
 ## Continuous integration
 
@@ -331,6 +353,8 @@ The workflow has read-only repository permissions, pins third-party actions to c
 Local validation on 2026-11-11 passed 66 CTest cases in GCC Release, Clang ASan/UBSan and the GCC coverage build; three TSan concurrency cases; 11 Node test results including their parent; six Chromium cases; real bridge integration and the paper smoke test. The C++ report measured 97.1% line coverage and 71.1% branch coverage. Node 24 and the GitHub-hosted environment are configured but await their hosted run.
 
 Coverage reports measure executed code, not proof of correctness. They currently have no percentage gate: inspect uncovered branches and add meaningful cases rather than tests that only reproduce implementation details. Sanitizers and concurrency tests cannot establish correctness for every schedule, architecture or input. The suite does not claim exhaustive testing of all possible executions.
+
+The multi-product update was verified locally on 2026-11-12 with 74 Release cases, 74 Clang ASan/UBSan cases, 14 Node test results, seven Chromium scenarios, real engine/bridge integration, the Docker smoke test, three TSan concurrency checks and a zero-allocation multi-product core benchmark. The earlier coverage percentages above describe the earlier code revision; coverage for this update is collected by the CI coverage job.
 
 ### Run the additional checks locally
 
@@ -407,7 +431,7 @@ node client/tests/paper_smoke.mjs
 
 The paper smoke test submits simulated orders and checks HTTP assets, health, restricted asset serving, acknowledgments, cancellation, two-session matching, and book snapshots. It requires client dependencies. Do not run it against a session whose test orders you want to preserve.
 
-The suite now includes forced hash collisions, inclusive/near-maximum price boundaries, sorted/aggregated top-10 snapshots, pool exhaustion, invalid replacement ownership, full-output admission checks, three reference-model seeds (60,000 generated requests), and a 20,000-request two-thread engine stress test. Recorded checks are dated in the project history; tests run through the commands above or GitHub Actions, rather than automatically on application startup.
+The suite also checks cross-product matching/cancel/modify isolation, shared global IDs, product-tagged snapshots, catalog validation and UI switching. It includes forced hash collisions, inclusive/near-maximum price boundaries, sorted/aggregated top-10 snapshots, pool exhaustion, invalid replacement ownership, full-output admission checks, three reference-model seeds (60,000 generated requests), and a 20,000-request two-thread engine stress test. Recorded checks are dated in the project history; tests run through the commands above or GitHub Actions, rather than automatically on application startup.
 
 ### Benchmark scope
 
@@ -415,7 +439,7 @@ The suite now includes forced hash collisions, inclusive/near-maximum price boun
 ./build/release/fastbid_bench
 ```
 
-The benchmark warms up with 10,000 requests, then measures 100,000 alternating resting/full-fill requests at production capacities. It includes inbound queue insertion, core processing, and outbound event draining. A C++ allocation guard detects calls to standard allocation operators in that measured workload. It is not a universal detector for every possible allocator or workload.
+The benchmark warms up with 10,000 requests, then measures 100,000 alternating resting/full-fill requests across the configured products at production capacities. It includes inbound queue insertion, core processing, and outbound event draining. A C++ allocation guard detects calls to standard allocation operators in that measured workload. It is not a universal detector for every possible allocator or workload.
 
 It excludes sockets, gateway parsing, snapshot work, browser activity, persistence, and realistic multi-client network contention. Previously observed WSL results were sub-microsecond for this workload; they are not an end-to-end latency guarantee. Record hardware, compiler, build flags, load, and workload whenever comparing results.
 
@@ -423,7 +447,7 @@ Dashboard latency is a different measurement: engine request processing through 
 
 ## Operations and troubleshooting
 
-`http://localhost:8080/healthz` returns 200 when the bridge has received a snapshot within two seconds, otherwise 503. It checks feed freshness, not every possible trading operation. The dashboard separately waits for its own engine connection and marks missing market data stale.
+`http://localhost:8080/healthz` returns 200 when the bridge has received a snapshot for every configured product within two seconds, otherwise 503. It checks feed freshness, not every possible trading operation. The dashboard separately waits for its own engine connection and marks missing market data stale.
 
 | Symptom | What to check |
 | --- | --- |
@@ -445,6 +469,6 @@ On SIGINT/SIGTERM [process stop signals], IO stops admitting requests. The engin
 
 The current scope is local paper trading and systems engineering. Before live trading, the project needs durable journal/replay [saved operations that can rebuild state], authenticated accounts, account risk/credit checks, duplicate-request suppression, reconnect and execution recovery, failover, authenticated market data, and target-hardware capacity testing.
 
-There is no automatic cancel-on-disconnect, user account ledger, market order, multi-instrument routing, historical trade replay, or guaranteed delivery after disconnection. Sequence and exchange IDs restart with the engine process. Origin filtering and session ownership are not account authentication. Keep the local stack private.
+There is no automatic cancel-on-disconnect, user account ledger, market order, historical trade replay, or guaranteed delivery after disconnection. Sequence and exchange IDs restart with the engine process. Origin filtering and session ownership are not account authentication. Keep the local stack private.
 
 Performance work should preserve correctness first: benchmark representative sparse/dense books, large sweeps, cancellations, many clients, saturated queues, and shutdown behavior before making latency claims.

@@ -1,6 +1,8 @@
 services:
   fastbid:
-    build: .
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
     network_mode: host
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
@@ -14,8 +16,8 @@ services:
     stop_grace_period: 30s
   ws_bridge:
     build:
-      context: ../client
-      dockerfile: Dockerfile.bridge
+      context: ..
+      dockerfile: client/Dockerfile.bridge
     network_mode: host
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
