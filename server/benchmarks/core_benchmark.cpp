@@ -24,16 +24,29 @@ void operator delete(void* p, std::size_t, std::align_val_t) noexcept { std::fre
 void operator delete[](void* p, std::size_t, std::align_val_t) noexcept { std::free(p); }
 int main() {
     using namespace fastbid;
-    using E = MatchingEngine<PRODUCT_LEVELS, 1048576, 65536, PRODUCT_COUNT>;
+    using E = MatchingEngine<PRODUCT_LEVELS, 1048576, 65536, PRODUCT_COUNT + MAX_BASKETS>;
     auto in = std::make_unique<E::InboundQueue>(); auto out = std::make_unique<E::OutboundQueue>();
     auto engine = std::make_unique<E>(*in, *out,
         MatchingEngineConfig{PRODUCT_BOOKS[0], std::span(PRODUCT_BOOKS).subspan(1)});
+    BasketDefinition basket{};
+    if (PRODUCT_COUNT >= 2) {
+        BasketRequest request{}; request.leg_count = 2;
+        std::memcpy(request.name, "Benchmark Mix", 13);
+        request.legs[0] = {PRODUCT_BOOKS[0].instrument_id, 2};
+        request.legs[1] = {PRODUCT_BOOKS[1].instrument_id, 3};
+        auto registration = engine->register_basket(request);
+        if (registration.reason) std::abort();
+        basket = registration.definition;
+    }
     constexpr std::size_t N = 100000;
     static uint64_t ns[N];
     auto run = [&](std::size_t i) {
-        const auto& product = PRODUCT_BOOKS[(i / 2) % PRODUCT_COUNT];
-        OrderMessage m{}; m.type = MessageType::NEW_ORDER; m.instrument_id = product.instrument_id;
-        m.side = i % 2 ? Side::SELL : Side::BUY; m.order_type = OrderType::LIMIT; m.price = product.reference_price; m.quantity = 100;
+        const auto index = (i / 2) % (PRODUCT_COUNT + (basket.instrument_id ? 1 : 0));
+        const bool group = index == PRODUCT_COUNT;
+        OrderMessage m{}; m.type = MessageType::NEW_ORDER;
+        m.instrument_id = group ? basket.instrument_id : PRODUCT_BOOKS[index].instrument_id;
+        m.side = i % 2 ? Side::SELL : Side::BUY; m.order_type = OrderType::LIMIT;
+        m.price = group ? basket.reference_price : PRODUCT_BOOKS[index].reference_price; m.quantity = 100;
         m.client_order_id = i + 1;
         if (!in->try_push(m)) std::abort();
         engine->process_batch(); EngineEvent e{}; while (out->try_pop(e)) {}

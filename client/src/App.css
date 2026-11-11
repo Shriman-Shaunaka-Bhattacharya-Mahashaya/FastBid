@@ -268,3 +268,23 @@ h2 {
 .product-picker { margin-bottom: 24px; }
 .product-picker label { margin-right: 12px; }
 .product-picker select { background: #171e2b; color: #edf2f7; padding: 10px 14px; border: 1px solid #475569; border-radius: 6px; max-width: 100%; }
+
+.basket-builder { margin-bottom: 24px; }
+.basket-builder p, .basket-recipe p { line-height: 1.5; }
+.basket-leg { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto; gap: 16px; align-items: end; }
+.basket-leg .form-group { min-width: 0; }
+.basket-leg > button { margin-bottom: 15px; }
+.form-group select { width: 100%; box-sizing: border-box; background: #171e2b; color: var(--text-main); padding: 10px; border: 1px solid #475569; border-radius: 6px; font: inherit; }
+.basket-builder-actions { display: flex; gap: 12px; flex-wrap: wrap; }
+.basket-builder-actions .btn-buy { flex: 0 1 220px; }
+.basket-builder button:not(.btn-buy), .basket-leg button { background: #253247; color: var(--text-main); border: 1px solid #475569; border-radius: 6px; padding: 10px 14px; cursor: pointer; }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+.basket-recipe { padding: 4px 16px; border-left: 3px solid var(--color-accent); background: rgba(59, 130, 246, 0.07); }
+.field-help { margin: 7px 0 0; color: var(--text-muted); font-size: 0.85rem; line-height: 1.5; }
+.basket-status { padding-top: 12px; color: var(--text-main); }
+@media (max-width: 600px) {
+  .basket-leg { grid-template-columns: minmax(0, 1fr); gap: 0; padding-bottom: 16px; margin-bottom: 16px; border-bottom: 1px solid #253247; }
+  .basket-leg > button { justify-self: start; }
+  .basket-builder-actions { flex-direction: column; }
+  .basket-builder-actions .btn-buy { flex: auto; }
+}

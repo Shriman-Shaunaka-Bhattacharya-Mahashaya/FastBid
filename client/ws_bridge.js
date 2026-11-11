@@ -6,6 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import { products } from './catalog.mjs';
+import { BasketControl } from './baskets.mjs';
 const productById = new Map(products.map(p => [p.id, p]));
 
 const host = process.env.FASTBID_WS_HOST || '127.0.0.1';
@@ -16,7 +17,7 @@ const server = http.createServer(async (req, res) => {
     if (req.method !== 'GET' && req.method !== 'HEAD') { res.writeHead(405); res.end(); return; }
     const pathname = new URL(req.url, 'http://localhost').pathname;
     if (pathname === '/healthz') {
-        const ready = products.every(p => Date.now() - (snapshots.get(p.id)?.at || 0) < 2000);
+        const ready = [...productById.values()].every(p => Date.now() - (snapshots.get(p.id)?.at || 0) < 2000);
         res.writeHead(ready ? 200 : 503, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
         res.end(JSON.stringify({ ready, mode: 'paper' })); return;
     }
@@ -44,6 +45,21 @@ const send = (ws, msg) => {
 };
 const broadcast = msg => { for (const ws of clients) send(ws, msg); };
 const error = (ws, message) => send(ws, { type: 'error', message });
+const basketControl = new BasketControl({
+    host: process.env.FASTBID_TCP_HOST || '127.0.0.1',
+    port: Number(process.env.FASTBID_TCP_PORT || 9000),
+    baseProducts: products,
+    onCatalog: (catalog, ready) => {
+        productById.clear();
+        for (const p of catalog) productById.set(p.id, p);
+        for (const id of snapshots.keys()) if (!productById.has(id)) snapshots.delete(id);
+        broadcast({ type: 'catalog', products: catalog, groups_ready: ready });
+    },
+    onLoss: () => {
+        snapshots.clear(); lastSequence = 0n; lastSnapshotAt = 0;
+        for (const ws of clients) ws.close(1011, 'Basket registry connection lost; reconnect to synchronize');
+    },
+});
 
 // One TCP session per WS client preserves cancellation ownership and report routing.
 // A lost session is closed, never silently retried: acceptance may be ambiguous.
@@ -57,7 +73,7 @@ wss.on('connection', ws => {
     let cancelCount = 0;
     let tokens = 100, lastRefill = Date.now();
     const tcp = net.createConnection({ host: process.env.FASTBID_TCP_HOST || '127.0.0.1', port: Number(process.env.FASTBID_TCP_PORT || 9000) });
-    send(ws, { type: 'catalog', products });
+    send(ws, { type: 'catalog', products: basketControl.catalog(), groups_ready: basketControl.ready });
     tcp.setNoDelay(true);
     tcp.on('connect', () => { ready = true; send(ws, { type: 'ready' }); });
     tcp.on('error', () => { error(ws, 'Engine unavailable; reconnect to open a new session'); });
@@ -86,6 +102,11 @@ wss.on('connection', ws => {
             } else if (type === 13) msg.instrument_id = pending.get(msg.client_order_id)?.instrument_id;
             if (type === 12 || (type === 11 && msg.remaining === 0)) openOrders.delete(msg.order_id);
             if (type === 10 || type === 13) pending.delete(msg.client_order_id);
+            const definition = productById.get(msg.instrument_id);
+            if (type === 11 && definition?.kind === 'basket') {
+                msg.basket_units = msg.quantity;
+                msg.constituent_fills = definition.legs.map(leg => ({ instrument_id: leg.instrument_id, quantity: leg.quantity * msg.quantity }));
+            }
             send(ws, msg); rx = rx.subarray(len);
         }
     });
@@ -96,9 +117,15 @@ wss.on('connection', ws => {
             if (tokens < 1) { error(ws, 'Rate limit: 100 requests/s'); return; } --tokens;
             if (!ready || blocked) { error(ws, 'Engine not ready or backpressured; request not sent'); return; }
             const req = JSON.parse(data);
+            if (!req || typeof req !== 'object' || Array.isArray(req)) throw Error('Expected an order command');
+            if (req.type === 'create_group') {
+                basketControl.create(req).then(product => send(ws, { type: 'group_created', product })).catch(err => error(ws, err.message));
+                return;
+            }
             const instrument_id = req.instrument_id === undefined ? products[0].id : req.instrument_id;
             const product = productById.get(instrument_id);
             if (!Number.isInteger(instrument_id) || !product) throw Error('Unknown product');
+            if (product.kind === 'basket' && !basketControl.ready) throw Error('Basket registry is synchronizing; try again shortly');
             let buf;
             if (req.type === 'new_order') {
                 if (pending.size >= 1024) throw Error('Too many pending requests');
@@ -106,6 +133,8 @@ wss.on('connection', ws => {
                     !Number.isInteger(req.quantity) || req.quantity <= 0 || req.quantity > 4294967295) throw Error('Invalid side, price or quantity');
                 const ticks = Math.round(req.price * 10000);
                 if (ticks < product.min_price_ticks || ticks > product.max_price_ticks || Math.abs(req.price * 10000 - ticks) > 0.000001) throw Error(`Price must be $${product.min_price}-$${product.max_price} with at most four decimal places`);
+                const step = product.tick_size_ticks || 1;
+                if ((ticks - product.min_price_ticks) % step) throw Error(`Price must use increments of $${step / 10000} from $${product.min_price}`);
                 buf = Buffer.alloc(38); buf.writeUInt16LE(38); buf[2] = 1;
                 buf.writeBigUInt64LE(++orderId, 4); buf.writeUInt32LE(instrument_id, 12); buf[16] = req.side === 'BUY' ? 1 : 2; buf[17] = 1;
                 buf.writeBigUInt64LE(BigInt(ticks), 18); buf.writeUInt32LE(req.quantity, 26);
@@ -151,10 +180,11 @@ udp.on('message', msg => {
 });
 udp.bind(Number(process.env.FASTBID_UDP_MCAST_PORT || 5000));
 const heartbeat = setInterval(() => {
-    for (const p of products) if (Date.now() - (snapshots.get(p.id)?.at || 0) > 2000) broadcast({ type: 'stale', instrument_id: p.id });
+    for (const p of productById.values()) if (Date.now() - (snapshots.get(p.id)?.at || 0) > 2000) broadcast({ type: 'stale', instrument_id: p.id });
     for (const ws of clients) { if (ws.alive === false) { ws.terminate(); continue; } ws.alive = false; ws.ping(); }
 }, 2000);
 wss.on('connection', ws => { ws.alive = true; ws.on('pong', () => { ws.alive = true; }); });
-function shutdown() { clearInterval(heartbeat); for (const ws of clients) ws.terminate(); wss.close(); server.close(); udp.close(); }
+function shutdown() { clearInterval(heartbeat); basketControl.close(); for (const ws of clients) ws.terminate(); wss.close(); server.close(); udp.close(); }
 process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
 server.listen(port, host, () => console.log(`[Bridge] Listening on ${host}:${port}`));
+basketControl.start();

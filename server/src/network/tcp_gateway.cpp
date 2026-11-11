@@ -13,7 +13,8 @@
 #include <unistd.h>
 namespace fastbid {
 namespace { void fatal(const char* what) { std::perror(what); std::exit(EXIT_FAILURE); } }
-TCPGateway::TCPGateway(InboundQueue& in, OutboundQueue&, const TCPGatewayConfig& cfg) : inbound_(in), config_(cfg) {}
+TCPGateway::TCPGateway(InboundQueue& in, OutboundQueue&, const TCPGatewayConfig& cfg, ControlInboundQueue* controls)
+    : inbound_(in), controls_(controls), config_(cfg) {}
 TCPGateway::~TCPGateway() {
     for (auto& [fd, ctx] : clients_) close(fd);
     if (listen_fd_ >= 0) close(listen_fd_);
@@ -58,9 +59,19 @@ bool TCPGateway::process_buffer(int, ClientContext& ctx) noexcept {
     std::size_t consumed = 0;
     for (int count = 0; count < 64 && ctx.rx_size - consumed >= sizeof(ProtocolHeader); ++count) {
         ProtocolHeader hdr{}; std::memcpy(&hdr, ctx.rx.data() + consumed, sizeof(hdr));
-        const auto expected = hdr.message_type == MessageType::NEW_ORDER ? 38u : hdr.message_type == MessageType::CANCEL ? 16u : 0u;
+        const bool control = hdr.message_type == MessageType::REGISTER_BASKET || hdr.message_type == MessageType::SYNC_BASKETS;
+        const auto expected = hdr.message_type == MessageType::NEW_ORDER ? 38u : hdr.message_type == MessageType::CANCEL ? 16u :
+            hdr.message_type == MessageType::REGISTER_BASKET && controls_ ? 192u : hdr.message_type == MessageType::SYNC_BASKETS && controls_ ? 12u : 0u;
         if (!expected || hdr.message_length != expected || hdr.reserved) return false;
-        if (ctx.rx_size - consumed < expected || !inbound_.available()) break;
+        if (ctx.rx_size - consumed < expected) break;
+        if (control) {
+            if (!controls_->available()) break;
+            ControlRequest request{}; request.type = hdr.message_type; request.session = ctx.session;
+            std::memcpy(&request.request, ctx.rx.data() + consumed + 4, expected - 4);
+            if (!controls_->try_push(request)) break;
+            consumed += expected; continue;
+        }
+        if (!inbound_.available()) break;
         OrderMessage msg{}; msg.connection_fd = ctx.session; msg.type = hdr.message_type;
         msg.timestamp = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count());
         if (hdr.message_type == MessageType::NEW_ORDER) {
@@ -113,8 +124,6 @@ int TCPGateway::poll(bool accept_orders) noexcept {
     return n > 0 ? n : 0;
 }
 void TCPGateway::send_event(const EngineEvent& e) noexcept {
-    auto session = sessions_.find(e.connection_fd); if (session == sessions_.end()) return;
-    const int fd = session->second; auto& ctx = clients_.find(fd)->second;
     char buf[64]{}; ResponseHeader hdr{};
     if (e.type == EngineEventType::ORDER_ACK || e.type == EngineEventType::CANCEL_ACK) {
         hdr = {20, e.type == EngineEventType::ORDER_ACK ? ResponseType::ACK : ResponseType::CANCEL_ACK, 0};
@@ -125,15 +134,27 @@ void TCPGateway::send_event(const EngineEvent& e) noexcept {
         hdr = {28, ResponseType::REJECT, 0}; RejectPayload p{e.order_id, e.client_order_id, e.price}; std::memcpy(buf + 4, &p, sizeof(p));
     } else return;
     std::memcpy(buf, &hdr, sizeof(hdr));
-    if (ctx.tx.size() - ctx.tx_end < hdr.message_length && ctx.tx_begin) {
+    send_bytes(e.connection_fd, buf, hdr.message_length);
+}
+void TCPGateway::send_control(const ControlResponse& response) noexcept {
+    char bytes[236]{}; ResponseHeader header{236, response.type, 0};
+    std::memcpy(bytes, &header, sizeof(header));
+    std::memcpy(bytes + 4, &response.request_id, 8); std::memcpy(bytes + 12, &response.reason, 8);
+    std::memcpy(bytes + 20, &response.definition, sizeof(response.definition));
+    send_bytes(response.session, bytes, sizeof(bytes));
+}
+void TCPGateway::send_bytes(int token, const char* bytes, std::size_t size) noexcept {
+    auto session = sessions_.find(token); if (session == sessions_.end()) return;
+    const int fd = session->second; auto& ctx = clients_.find(fd)->second;
+    if (ctx.tx.size() - ctx.tx_end < size && ctx.tx_begin) {
         std::memmove(ctx.tx.data(), ctx.tx.data() + ctx.tx_begin, ctx.tx_end - ctx.tx_begin);
         ctx.tx_end -= ctx.tx_begin; ctx.tx_begin = 0;
     }
-    if (ctx.tx.size() - ctx.tx_end < hdr.message_length) {
+    if (ctx.tx.size() - ctx.tx_end < size) {
         std::fprintf(stderr, "[TCP] Disconnecting slow session %d: report buffer exhausted\n", ctx.session);
         disconnect(fd); return;
     }
-    std::memcpy(ctx.tx.data() + ctx.tx_end, buf, hdr.message_length); ctx.tx_end += hdr.message_length;
+    std::memcpy(ctx.tx.data() + ctx.tx_end, bytes, size); ctx.tx_end += size;
     if (!flush(fd, ctx)) disconnect(fd);
 }
 bool TCPGateway::output_pending() const noexcept {

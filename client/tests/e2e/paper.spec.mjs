@@ -108,3 +108,64 @@ test('product switching preserves orders and prevents cross-product matches', as
     await expect(page.locator('.asks .book-row')).toHaveCount(0);
     await other.close();
 });
+
+test('basket creation validates its name, distinct products and share counts', async ({ page }) => {
+    await ready(page);
+    const create = page.getByRole('button', { name: 'Create basket', exact: true });
+    await expect(create).toBeEnabled();
+    await page.getByLabel('Basket name', { exact: true }).fill('   ');
+    await create.click();
+    await expect(page.getByRole('status').filter({ hasText: 'Basket name must contain' })).toBeVisible();
+    await page.getByLabel('Basket name', { exact: true }).fill('Invalid shares');
+    await page.getByLabel('Shares in product 1', { exact: true }).fill('0');
+    await create.click();
+    await expect(page.getByRole('status').filter({ hasText: 'Shares per product must be' })).toBeVisible();
+    await page.getByLabel('Shares in product 1', { exact: true }).fill('2');
+    await page.getByLabel('Basket product 2', { exact: true }).selectOption('1');
+    await create.click();
+    await expect(page.getByRole('status').filter({ hasText: 'Each basket row must use a different base product' })).toBeVisible();
+    await expect(page.getByLabel('Product', { exact: true })).toHaveValue('1');
+});
+
+test('whole baskets register globally, fill in fixed ratios, and reuse an identical recipe', async ({ page, context }) => {
+    const other = await context.newPage(); await ready(page); await ready(other);
+    await other.getByLabel('Product', { exact: true }).selectOption('3');
+    await page.getByLabel('Basket name', { exact: true }).fill('Fruit Mix');
+    await page.getByLabel('Basket product 1', { exact: true }).selectOption('1');
+    await page.getByLabel('Shares in product 1', { exact: true }).fill('2');
+    await page.getByLabel('Basket product 2', { exact: true }).selectOption('2');
+    await page.getByLabel('Shares in product 2', { exact: true }).fill('3');
+    const create = page.getByRole('button', { name: 'Create basket', exact: true });
+    await expect(create).toBeEnabled(); await create.click();
+    await expect.poll(async () => Number(await page.getByLabel('Product', { exact: true }).inputValue())).toBeGreaterThanOrEqual(0x80000000);
+    const basketId = await page.getByLabel('Product', { exact: true }).inputValue();
+    await expect(page.getByLabel('Basket name', { exact: true })).toHaveValue('');
+    await expect(page.getByLabel('Price')).toHaveValue('50');
+    await expect(page.locator('.basket-recipe')).toContainText('One basket: 2 × Apples + 3 × Bananas.');
+    await expect(other.getByLabel('Product', { exact: true })).toHaveValue('3');
+    await expect(other.getByLabel('Product', { exact: true }).locator(`option[value="${basketId}"]`)).toHaveCount(1);
+    await other.getByLabel('Product', { exact: true }).selectOption(basketId);
+    await expect(page.getByText('LIVE', { exact: true })).toBeVisible();
+    await expect(other.getByText('LIVE', { exact: true })).toBeVisible();
+    await submit(page, 'BUY', 50, 3);
+    await expect(openOrders(page)).toContainText('BUY 3 @ $50');
+    await submit(other, 'SELL', 50, 1);
+    await expect(openOrders(page)).toContainText('BUY 2 @ $50');
+    await expect(openOrders(other)).toContainText('No open orders');
+    await expect(page.locator('.trade-row')).toHaveCount(1);
+    await expect(page.locator('.trade-row')).toContainText('1 basket(s)');
+    await openOrders(page).getByRole('button', { name: 'Cancel', exact: true }).click();
+    await expect(openOrders(page)).toContainText('No open orders');
+    for (const id of ['1', '2']) {
+        await page.getByLabel('Product', { exact: true }).selectOption(id);
+        await expect(page.locator('.bids .book-row')).toHaveCount(0);
+        await expect(page.locator('.asks .book-row')).toHaveCount(0);
+    }
+    await other.getByLabel('Basket name', { exact: true }).fill('Same Recipe Alias');
+    await other.getByRole('button', { name: 'Create basket', exact: true }).click();
+    await expect(other.getByLabel('Basket name', { exact: true })).toHaveValue('');
+    await expect(other.getByLabel('Product', { exact: true })).toHaveValue(basketId);
+    await expect(page.getByLabel('Product', { exact: true })).toHaveValue('2');
+    await expect(other.getByLabel('Product', { exact: true }).locator(`option[value="${basketId}"]`)).toHaveCount(1);
+    await other.close();
+});

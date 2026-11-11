@@ -7,6 +7,7 @@ add_executable(fastbid_tests
     test_udp_publisher.cpp
     test_gateway_limits.cpp
     test_multi_product.cpp
+    test_baskets.cpp
 )
 
 target_link_libraries(fastbid_tests PRIVATE

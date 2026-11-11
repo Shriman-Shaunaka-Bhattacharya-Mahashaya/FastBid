@@ -47,7 +47,9 @@ enum class OrderType : uint8_t {
 enum class MessageType : uint8_t {
     NEW_ORDER = 1,
     CANCEL    = 2,
-    MODIFY    = 3
+    MODIFY    = 3,
+    REGISTER_BASKET = 4,
+    SYNC_BASKETS = 5
 };
 
 /// Outbound message types (gateway → TCP client)
@@ -55,7 +57,9 @@ enum class ResponseType : uint8_t {
     ACK        = 10,
     FILL       = 11,
     CANCEL_ACK = 12,
-    REJECT     = 13
+    REJECT     = 13,
+    BASKET_REPORT = 14,
+    BASKET_SYNC_DONE = 15
 };
 
 /// Engine event types (engine → outbound queue)

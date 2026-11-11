@@ -52,7 +52,7 @@ jobs:
           -DBUILD_TESTS=ON ${{ matrix.options }}
       - name: Build
         run: cmake --build build --parallel 2
-      - name: Unit, model and real-socket tests
+      - name: Unit, model, socket and whole-basket control tests
         run: ctest --test-dir build --output-on-failure --parallel 2 --output-junit "$GITHUB_WORKSPACE/build/test-results.xml"
       - name: Allocation regression guard
         if: matrix.name == 'gcc-release'
@@ -95,12 +95,15 @@ jobs:
           # Keep the hosted runner's address layout compatible with GCC TSan.
           sudo sysctl vm.mmap_rnd_bits=28
           ./build/tests/fastbid_tests --gtest_filter='SPSCQueueTest.ConcurrentProducerConsumer:Stats.ConcurrentTransferAccountsForEverySample:EngineConcurrency.*' --gtest_output=xml:build/tsan-results.xml
+          ctest --test-dir build -R '^basket_control_integration$' --output-on-failure --output-junit "$GITHUB_WORKSPACE/build/tsan-basket-results.xml"
       - name: Upload race-check results
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: thread-sanitizer
-          path: build/tsan-results.xml
+          path: |
+            build/tsan-results.xml
+            build/tsan-basket-results.xml
           if-no-files-found: ignore
           retention-days: 7
 
@@ -156,7 +159,7 @@ jobs:
       - name: Test real orders over HTTP and WebSockets
         working-directory: client
         run: npm run test:paper -- "$PAPER_BASE_URL"
-      - name: Test dashboard in Chromium
+      - name: Test dashboard and basket creation/trading in Chromium
         working-directory: client
         run: npm run test:e2e
       - name: Save container diagnostics
@@ -196,8 +199,9 @@ jobs:
         run: |
           cmake -S server -B build -DCMAKE_BUILD_TYPE=Release
           cmake --build build --parallel 2
-      - name: Install bridge dependencies and verify protocols
+      - name: Install bridge dependencies and verify product and basket protocols
         working-directory: client
         run: |
           npm ci
           npm run test:bridge -- ../build/fastbid
+          npm run test:baskets -- ../build/fastbid

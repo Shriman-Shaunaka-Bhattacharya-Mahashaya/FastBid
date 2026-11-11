@@ -8,6 +8,7 @@
 !client/package-lock.json
 !client/ws_bridge.js
 !client/catalog.mjs
+!client/baskets.mjs
 !client/index.html
 !client/vite.config.js
 !client/src/

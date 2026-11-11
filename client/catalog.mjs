@@ -5,7 +5,7 @@ export function validateCatalog(data) {
         throw Error('Catalog requires 1 to 16 products');
     const ids = new Set();
     return data.products.map(p => {
-        if (!Number.isInteger(p.id) || p.id < 1 || p.id > 4294967295 || ids.has(p.id) ||
+        if (!Number.isInteger(p.id) || p.id < 1 || p.id >= 2147483648 || ids.has(p.id) ||
             typeof p.name !== 'string' || !p.name.trim() || typeof p.symbol !== 'string' || !p.symbol.trim() ||
             ![p.min_price_ticks, p.max_price_ticks, p.reference_price_ticks].every(n => Number.isSafeInteger(n) && n > 0 && n <= 4294967295) ||
             p.max_price_ticks < p.min_price_ticks || p.max_price_ticks - p.min_price_ticks + 1 > 100001 ||

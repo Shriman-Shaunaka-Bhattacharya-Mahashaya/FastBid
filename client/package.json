@@ -9,6 +9,7 @@
     "preview": "vite preview",
     "test": "npm run build && node --test --test-reporter=spec tests/*.test.mjs",
     "test:bridge": "node tests/bridge_integration.mjs",
+    "test:baskets": "node tests/basket_integration.mjs",
     "test:paper": "node tests/paper_smoke.mjs",
     "test:e2e": "playwright test"
   },

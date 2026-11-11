@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_map>
 #include "core/types.hpp"
+#include "core/basket.hpp"
 #include "memory/spsc_queue.hpp"
 namespace fastbid {
 struct TCPGatewayConfig {
@@ -17,13 +18,14 @@ class TCPGateway {
 public:
     using InboundQueue = SPSCQueue<OrderMessage, 65536>;
     using OutboundQueue = SPSCQueue<EngineEvent, 65536>;
-    TCPGateway(InboundQueue&, OutboundQueue&, const TCPGatewayConfig&);
+    TCPGateway(InboundQueue&, OutboundQueue&, const TCPGatewayConfig&, ControlInboundQueue* = nullptr);
     ~TCPGateway();
     TCPGateway(const TCPGateway&) = delete;
     TCPGateway& operator=(const TCPGateway&) = delete;
     void init();
     int poll(bool accept_orders = true) noexcept;
     void send_event(const EngineEvent&) noexcept;
+    void send_control(const ControlResponse&) noexcept;
     bool output_pending() const noexcept;
 private:
     struct ClientContext {
@@ -37,7 +39,9 @@ private:
     bool process_buffer(int, ClientContext&) noexcept;
     bool flush(int, ClientContext&) noexcept;
     void disconnect(int) noexcept;
+    void send_bytes(int session, const char* data, std::size_t size) noexcept;
     InboundQueue& inbound_;
+    ControlInboundQueue* controls_;
     TCPGatewayConfig config_;
     int listen_fd_ = -1, epoll_fd_ = -1;
     uint64_t next_session_ = 1;
