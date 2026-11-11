@@ -4,6 +4,7 @@ COPY client/package.json client/package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY client/ws_bridge.js ./
 COPY client/catalog.mjs ./
+COPY client/baskets.mjs ./
 COPY config/products.json /config/products.json
 USER node
 CMD ["node", "ws_bridge.js"]

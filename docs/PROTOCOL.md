@@ -48,3 +48,31 @@ Every browser has its own TCP engine connection, shared across its selected prod
 Execution reports, trades, snapshots and stale notifications carry `instrument_id`. The binary TCP response layout remains unchanged: the bridge correlates ACKs with pending requests and tracks product ownership for fills/cancels. Cancel request product IDs are queued for response correlation, including rejections. Wrong-product cancel/modify on a known product returns order-not-found (reason 3) without changing the original. Exchange IDs are JSON strings to avoid JavaScript precision loss. The bridge returns `execution_report` (ACK/FILL/CANCEL_ACK/REJECT) to the owner and broadcasts `book_snapshot` (including `stats`) and `trade`. `error` means a bridge request was not dispatched; `stale` means the data feed has timed out. A session loss after dispatch has ambiguous acceptance. The dashboard reconnects but never automatically resubmits orders.
 
 Bridge limits: 256 clients, 4 KiB inbound messages, 64 KiB buffered WS output, 100 commands/sec/client with a 100-command burst. Origin filtering is browser protection only; callers can forge Origin outside a browser. Use authenticated private access for remote use.
+
+
+## Runtime basket control extension
+
+Base IDs must be below `0x80000000`. The engine assigns eight possible basket IDs starting at `0x80000000`. NEW/CANCEL/FILL layouts and market-data version 2 remain unchanged for baskets; their quantity counts whole basket units and their price is the total basket limit price. Registration is a separate engine-owned control path. Recipes may only reference distinct base products; no nested baskets or normalization by common quantity factors is performed.
+
+All messages below use the existing four-byte header and little-endian fields. Reserved fields and unused leg/name bytes must be zero.
+
+| Control request | Type | Total bytes | Layout |
+| --- | --- | --- | --- |
+| REGISTER_BASKET | 4 | 192 | request_id u64 at 4; leg_count u16 at 12; reserved u16 at 14; name48 ASCII bytes at 16; sixteen `(instrument_id u32, shares u32)` pairs at 64 |
+| SYNC_BASKETS | 5 | 12 | request_id u64 at 4 |
+
+A registration requires 2-16 unique base legs, 1-1000 shares per leg, total shares <=10000, and a trimmed printable ASCII name of 1-48 bytes. Unused leg entries must be zero. The engine sorts valid legs for identity. An identical recipe returns its existing immutable definition even at full capacity; the first registered name is retained.
+
+Both `BASKET_REPORT` (type14) and `BASKET_SYNC_DONE` (type15) are **236 bytes**: request_id u64 at4, reason u64 at12, and a 216-byte definition at20. Reason0 means success; reason9 invalid definition/arithmetic, reason10 capacity exhausted. An internal direct registration call can return reason11 if a sweep is pending; runtime registration is deferred until a completed-request boundary. Synchronization returns one type14 definition per registered basket followed by a zero-definition type15 with the same request ID. Definitions are not broadcast automatically to unrelated native control connections.
+
+Definition offsets in the complete response: instrument_id u32 at20; tick_size_ticks u32 at24; minimum u64 at28; maximum u64 at36; reference u64 at44; name48 at52; leg_count u16 at100; reserved u16 at102; sixteen leg pairs at104; reserved_end u32 at232. A successful registration report includes the derived price grid. A rejection has a zero definition. The sync-done definition is entirely zero.
+
+The weighted minimum anchors the grid. The step is the smallest positive integer tick that keeps the weighted range within the book's preallocated level count. Maximum and reference are rounded down to this grid. Every order must satisfy `(price - minimum) % tick_size_ticks == 0`. A constant-price basket can use one level. Group definitions are volatile engine state, not balances or inventory.
+
+The bridge maintains a dedicated control TCP connection, bounds pending registrations at64 and synchronizes metadata before enabling basket creation/trading. It fails closed on malformed/lost control state and resynchronizes after reconnect. Browser `catalog` messages include `groups_ready`; basket entries include `kind: "basket"`, legs and tick_size_ticks. A bridge-only restart restores definitions; an engine restart clears them.
+
+```json
+{"type":"create_group","name":"Fruit Mix","legs":[{"instrument_id":1,"quantity":2},{"instrument_id":2,"quantity":3}]}
+```
+
+The requester receives `group_created` with the product definition only after engine confirmation; all connected browsers receive the refreshed catalog. Trade it with existing new_order/cancel commands using its returned instrument ID. Basket fill reports add `basket_units` and `constituent_fills` as informational share totals (`filled basket units * shares per unit`). They do not represent independent underlying-book executions or account settlement.

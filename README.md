@@ -9,6 +9,7 @@ The focus is predictable order processing: preallocated memory, one owner of the
 - [Capabilities and scope](#capabilities-and-scope)
 - [Quick start: local paper trading](#quick-start-local-paper-trading)
 - [Products and catalog configuration](#products-and-catalog-configuration)
+- [Create and trade baskets](#create-and-trade-baskets)
 - [Try a complete trading workflow](#try-a-complete-trading-workflow)
 - [Architecture](#architecture)
 - [Matching rules and data structures](#matching-rules-and-data-structures)
@@ -26,9 +27,10 @@ The focus is predictable order processing: preallocated memory, one owner of the
 
 | Area | Implemented behavior |
 | --- | --- |
-| Matching | Independent product books; limit BUY/SELL orders; best price first, then arrival order |
+| Matching | Independent base-product and basket books; limit BUY/SELL orders; best price first, then arrival order |
 | Execution | Partial fills, multiple fills, execution at the resting order's price |
 | Cancellation | The current owner session can cancel its resting orders |
+| Baskets | Runtime creation of immutable weighted groups, shared catalogs and whole-basket trading |
 | Modification | Internal cancel-and-replace implementation; not exposed over TCP or the dashboard |
 | Memory | Fixed order pool, price array, intrusive order index, bounded SPSC queues |
 | TCP | Binary NEW/CANCEL requests; correlated ACK/FILL/CANCEL_ACK/REJECT responses |
@@ -108,6 +110,39 @@ Add or edit an entry, then rebuild **both** services with `paper.ps1 start` or t
 One matching thread serializes all products, sharing the existing order pool, inbound queue, outbound queue and global order/trade ID counters. Each product has separate price levels, occupancy bitmap and order index. A full shared pool can reject requests for any product. A pending sweep retains priority across the shared input stream. More products reserve more book/index memory; they do not create a matching thread per product. Latency and throughput statistics remain engine-wide, while depth, trades and freshness are product-specific. The bridge's health endpoint requires fresh snapshots for every configured product.
 
 Market-data packets now use version 2 and include product IDs. Update custom UDP subscribers alongside the engine/bridge. Binary TCP NEW and CANCEL messages retain their existing sizes and already include `instrument_id`; see [protocol details](docs/PROTOCOL.md).
+
+## Create and trade baskets
+
+A basket is a tradable group containing fixed quantities of different base products. For example, **Fruit Mix** can contain **2 Apples + 3 Bananas**. One order unit is one entire basket. A fill of three units represents **6 Apples + 9 Bananas together**. The entered price is the **total price per basket**, not a price per individual share.
+
+### Browser workflow
+
+1. Open the dashboard and wait until basket creation is available. This requires the bridge to synchronize with the engine's basket registry.
+2. In **Create a Product Basket**, enter a name and choose at least two different base products with the desired shares per basket.
+3. Click **Create basket**. Wait for the engine acknowledgment; only then is the basket added to the shared selector.
+4. Select the basket in another tab. Its description shows the recipe, total-price range and allowed increment.
+5. In the first tab, BUY three baskets at the reference total price. In the second tab, SELL one identical basket at that price.
+6. One basket trades, leaving two on the buyer's order. Cancel the remainder as with a base-product order.
+
+Basket definitions are shared by all connected clients. The name is a label; the **exact composition** identifies the market. Reordering the same legs reuses the same basket ID and original name. `2 Apples + 4 Bananas` is different from `1 Apple + 2 Bananas`: quantities are not divided by a common factor. Two different recipes with the same name still have separate books. Definitions cannot be edited or deleted during a session; creating a new recipe consumes a new slot.
+
+Baskets trade against identical basket orders in their own books. They do **not** split into individual product orders, consume liquidity in underlying books, check stock ownership, or transfer cash/inventory in an account ledger. Partial fills are allowed in whole basket units, so constituent ratios are never partially filled within one unit. Creating a group does not purchase or reserve its ingredients.
+
+### Validation and price increments
+
+At most **eight** basket definitions can exist per engine process. Each needs **2-16 distinct base products**, each with **1-1,000 integer shares**, with at most **10,000 total shares**. Nested baskets, repeated legs, unknown products, zero/fractional quantities and oversized definitions are rejected. Names contain 1-48 trimmed printable ASCII characters. Once the eight slots are full, new recipes are rejected; existing recipes remain tradable and repeated creation still returns their existing ID. Definitions disappear when the engine restarts.
+
+The basket price range is derived from the weighted sums of constituent minimum/maximum prices. To retain bounded array storage, its increment in integer ticks is `max(1, ceil((weighted_max - weighted_min) / (book_level_capacity - 1)))` when the capacity exceeds one. The highest allowed price and reference are rounded down to this grid anchored at the weighted minimum. A one-level book supports a constant-price basket. The UI exposes the actual range/increment and the bridge and engine both reject off-grid prices.
+
+For the default `2 Apples + 3 Bananas` recipe, the range is **$25-$75**, reference **$50**, and increment **$0.0005**. A $50.0001 order is invalid; $50.0005 is valid. These are configured simulation price bands, not live valuations. Base-product increments remain $0.0001.
+
+### Ownership, recovery and performance
+
+The matching thread owns registration and assigns IDs from `2147483648` upward. It reserves eight extra book slots at startup and initializes a new book between completed order requests. Registration can briefly delay order processing while a book is initialized, but ordinary order messages and fill events retain their compact sizes. The shared order pool and globally unique exchange/trade IDs also cover baskets. A full pool can affect any instrument.
+
+A dedicated bridge control connection registers and synchronizes definitions separately from order flow. After a bridge-only restart, definitions are fetched from the still-running engine with their original IDs. Losing the control connection disables group creation/trading and closes existing browser sessions until they reconnect; old session orders still follow the documented reconnect limitation. An engine restart clears both definitions and orders, so stale basket IDs cannot be reused blindly. Native control clients can explicitly synchronize; the browser bridge discovers its own registrations immediately and other control clients' registrations on its next synchronization.
+
+Budget roughly **290 MiB for core reserved address space** in the default process including eight potential basket books, plus network/runtime overhead; residency grows as books are initialized. Configuring more base products increases that reservation. Local image recreation clears simulated state, so finish a session before applying a rebuild. Use the existing `paper.ps1 start` command to load this feature.
 
 ## Try a complete trading workflow
 
@@ -297,7 +332,7 @@ Current limits:
 
 | Setting | Value |
 | --- | --- |
-| Products | IDs `1`, `2`, `3`; shared catalog; up to 16 configured |
+| Products | IDs `1`, `2`, `3`; shared catalog; up to 16 configured base products plus eight runtime baskets |
 | Price band | `50000` to `150000` ticks inclusive, equivalent to $5-$15 |
 | Reference price | `100000` ticks, equivalent to $10 |
 | Price levels | Up to `100001` per product |
@@ -310,7 +345,7 @@ Current limits:
 | Bridge command rate | 100/second/client, with a 100-command burst |
 | Snapshot depth and interval | Top 10 per side, approximately 50 ms when engine progress allows |
 
-Core capacities are compiled into the program; they are not all environment-configurable. Budget roughly 190 MiB with the default three-product catalog for engine/queue state, plus connection buffers, kernel socket buffers, runtime overhead, and frontend services. Busy polling can use substantial CPU even when idle. CPU affinity uses the process's allowed CPU mask and normal scheduling. Optional memory locking does not lock future allocations and can fail without sufficient privileges.
+Core capacities are compiled into the program; they are not all environment-configurable. Budget roughly 290 MiB of reserved core address space with the default three-product catalog and eight basket slots for engine/queue state, plus connection buffers, kernel socket buffers, runtime overhead, and frontend services. Busy polling can use substantial CPU even when idle. CPU affinity uses the process's allowed CPU mask and normal scheduling. Optional memory locking does not lock future allocations and can fail without sufficient privileges.
 
 ## Protocols and overload behavior
 
@@ -345,7 +380,7 @@ Public UDP data is best effort [delivery is not guaranteed]. One product-tagged 
 | GCC coverage | Instrumented suite plus HTML and Cobertura XML coverage reports |
 | ThreadSanitizer | Concurrent queue, sample-transfer and two-thread engine stress tests |
 | Node.js 22 and 24 | Locked dependency installation, dashboard build, controlled bridge failure-path tests |
-| Engine/bridge integration | Real C++ engine and browser bridge protocol interoperability |
+| Engine/bridge integration | Real product and basket protocols, simultaneous recipe creation, partial fills, bridge resynchronization and engine restart invalidation |
 | Docker and Chromium | Isolated paper-image build, readiness, socket smoke test and actual dashboard browser tests |
 
 The workflow has read-only repository permissions, pins third-party actions to commit hashes, cancels superseded runs on the same ref, and uses bounded job timeouts. Diagnostic artifacts are restricted to named test reports, coverage files, container logs, and browser results; retention is seven days. The temporary test stack is stopped even when a test fails. Hosted-runner benchmark timing is informational; only allocation/correctness failures fail the benchmark check.
@@ -356,6 +391,8 @@ Coverage reports measure executed code, not proof of correctness. They currently
 
 The multi-product update was verified locally on 2026-11-12 with 74 Release cases, 74 Clang ASan/UBSan cases, 14 Node test results, seven Chromium scenarios, real engine/bridge integration, the Docker smoke test, three TSan concurrency checks and a zero-allocation multi-product core benchmark. The earlier coverage percentages above describe the earlier code revision; coverage for this update is collected by the CI coverage job.
 
+The whole-basket extension was verified locally on 2026-11-12 with 93 CTest cases in Release and Clang ASan/UBSan, 30 Node results, nine Chromium scenarios, real engine/bridge recovery integration, the paper smoke test, three TSan concurrency cases plus real basket-control integration under TSan, and zero C++ allocations in the measured base-and-basket benchmark. These results do not update the earlier coverage percentages; CI collects current coverage separately.
+
 ### Run the additional checks locally
 
 From `client/`, with a supported Node.js installation:
@@ -364,6 +401,7 @@ From `client/`, with a supported Node.js installation:
 npm ci
 npm test
 npm run test:bridge -- ../build/release/fastbid
+npm run test:baskets -- ../build/release/fastbid
 ```
 
 `npm test` builds the dashboard and exercises a controlled TCP engine and UDP sender. Cases include malformed commands/responses, split replies, origin filtering, rate limiting, oversized messages, static asset restrictions, sequence filtering, feed timeout/recovery and upstream loss.
@@ -431,7 +469,7 @@ node client/tests/paper_smoke.mjs
 
 The paper smoke test submits simulated orders and checks HTTP assets, health, restricted asset serving, acknowledgments, cancellation, two-session matching, and book snapshots. It requires client dependencies. Do not run it against a session whose test orders you want to preserve.
 
-The suite also checks cross-product matching/cancel/modify isolation, shared global IDs, product-tagged snapshots, catalog validation and UI switching. It includes forced hash collisions, inclusive/near-maximum price boundaries, sorted/aggregated top-10 snapshots, pool exhaustion, invalid replacement ownership, full-output admission checks, three reference-model seeds (60,000 generated requests), and a 20,000-request two-thread engine stress test. Recorded checks are dated in the project history; tests run through the commands above or GitHub Actions, rather than automatically on application startup.
+The suite also checks basket recipes, idempotent creation, limits/overflow, price grids, capacity, whole-unit partial fills, separate underlying books and registry synchronization. It checks cross-product matching/cancel/modify isolation, shared global IDs, product-tagged snapshots, catalog validation and UI switching. It includes forced hash collisions, inclusive/near-maximum price boundaries, sorted/aggregated top-10 snapshots, pool exhaustion, invalid replacement ownership, full-output admission checks, three reference-model seeds (60,000 generated requests), and a 20,000-request two-thread engine stress test. Recorded checks are dated in the project history; tests run through the commands above or GitHub Actions, rather than automatically on application startup.
 
 ### Benchmark scope
 
@@ -447,7 +485,7 @@ Dashboard latency is a different measurement: engine request processing through 
 
 ## Operations and troubleshooting
 
-`http://localhost:8080/healthz` returns 200 when the bridge has received a snapshot for every configured product within two seconds, otherwise 503. It checks feed freshness, not every possible trading operation. The dashboard separately waits for its own engine connection and marks missing market data stale.
+`http://localhost:8080/healthz` returns 200 when the bridge has received a snapshot for every configured base product and registered basket within two seconds, otherwise 503. It checks feed freshness, not every possible trading operation. The dashboard separately waits for its own engine connection and marks missing market data stale.
 
 | Symptom | What to check |
 | --- | --- |
